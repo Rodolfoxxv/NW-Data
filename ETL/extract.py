@@ -2,15 +2,13 @@ import os
 import csv
 import re
 
-# Caminho do arquivo SQL
-sql_path = r'D:\Projetos\Nort\mywind-master\mywind-master\northwind-data.sql'
-# Diretório de saída para os arquivos CSV
-output_dir = r'D:\Projetos\Nort\mywind-master\mywind-master\csv_output'
 
-# Certifica-se de que o diretório de saída existe
+sql_path = r'Seu Caminho\northwind-data.sql'
+
+output_dir = r'Seu Caminho\mywind-master\csv_output'
+
 os.makedirs(output_dir, exist_ok=True)
 
-# Padrões regex para capturar o nome da tabela e dados
 table_name_pattern = re.compile(r"Dumping data for table '(\w+)'")
 insert_pattern = re.compile(r"INSERT INTO `(\w+)` \((.+)\) VALUES (.+);")
 

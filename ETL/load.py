@@ -6,7 +6,7 @@ import csv
 import json
 
 # Diretório dos arquivos CSV
-csv_dir = r'D:\Projetos\Nort\mywind-master\mywind-master\csv_output'
+csv_dir = r'Seu Caminho\mywind-master\csv_output'
 
 # Caminho para o arquivo que armazena as tabelas já carregadas
 tabelas_carregadas_file = 'tabelas_carregadas.json'

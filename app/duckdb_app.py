@@ -14,7 +14,7 @@ if DUCKDB_PATH is None:
     st.error("DUCKDB_PATH não está definido no arquivo .env")
     st.stop()
 
-full_duckdb_path = Path('D:/Projetos/NW-Data/data') / DUCKDB_PATH
+full_duckdb_path = Path('Caminho do Projeto') / DUCKDB_PATH
 full_duckdb_path = full_duckdb_path.resolve()
 
 # ========= Pipeline do DuckDB =========
@@ -22,7 +22,8 @@ class DuckDBPipeline:
     def __init__(self, db_path: str):
         self.conn = duckdb.connect(db_path)
         self.create_metadata_table()
-
+   
+    # Tabela que vai gerenciar os Schemas ****Importante pra usar no SupaBase e para o APP****
     def create_metadata_table(self):
         """Cria a tabela de metadados usando table_name como PRIMARY KEY."""
         self.conn.execute("""
@@ -32,7 +33,7 @@ class DuckDBPipeline:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
-
+# ========= CRUD =========
     def create_table_dynamic(self, table_name: str, fields: list):
         """Cria tabelas dinamicamente com base em um schema fornecido."""
         existing = self.conn.execute(
@@ -77,7 +78,7 @@ class DuckDBPipeline:
 
             column_defs.append(col_def)
 
-        # Adicionar constraints para chaves primárias
+        
         if pk_columns:
             if len(pk_columns) > 1:
                 column_defs.append(f"PRIMARY KEY ({', '.join(pk_columns)})")
@@ -98,20 +99,20 @@ class DuckDBPipeline:
 
         try:
             if primary_keys:
-                # Verificar chaves primárias ausentes
+               
                 missing_pks = [pk for pk in primary_keys if pk not in data]
                 if missing_pks:
                     st.error(f"Valores faltando para chave(s) primária(s): {', '.join(missing_pks)}")
                     return False
 
-                # Gerar ID automático se for chave única 'id'
+               
                 if len(primary_keys) == 1 and primary_keys[0] == "id" and not data.get("id"):
                     max_id = self.conn.execute(
                         f"SELECT COALESCE(MAX(id), 0) FROM {table_name};"
                     ).fetchone()[0]
                     data["id"] = max_id + 1
 
-                # Verificar duplicatas
+               
                 pk_conditions = " AND ".join([f"{pk} = ?" for pk in primary_keys])
                 pk_values = tuple(data[pk] for pk in primary_keys)
                 exists = self.conn.execute(
@@ -123,7 +124,7 @@ class DuckDBPipeline:
                     st.error(f"Registro já existe: {dict(zip(primary_keys, pk_values))}")
                     return False
 
-            # Inserir dados
+            
             columns = ", ".join(data.keys())
             placeholders = ", ".join(["?"] * len(data))
             self.conn.execute(
@@ -182,7 +183,7 @@ class DuckDBPipeline:
             return False
 
     def get_table_metadata(self, table_name: str):
-        """Obtém metadados da tabela com tratamento para tabelas inexistentes."""
+        """metadados das tabelas."""
         try:
             row = self.conn.execute(
                 "SELECT schema_json FROM table_metadata WHERE table_name = ?;",
@@ -194,7 +195,7 @@ class DuckDBPipeline:
             return {}
 
     def list_tables(self):
-        """Lista todas as tabelas com tratamento de erros."""
+        """Lista todas as tabelas com erros."""
         try:
             rows = self.conn.execute("SELECT table_name FROM table_metadata;").fetchall()
             return [r[0] for r in rows]
@@ -203,7 +204,7 @@ class DuckDBPipeline:
             return []
 
     def get_table_data(self, table_name: str):
-        """Obtém dados da tabela com tratamento de erros."""
+        """Obtém dados da tabela com erros."""
         try:
             return self.conn.execute(f"SELECT * FROM {table_name};").fetchdf()
         except Exception as e:
@@ -211,7 +212,7 @@ class DuckDBPipeline:
             return pd.DataFrame()
 
     def close(self):
-        """Fecha a conexão com segurança."""
+        """Fecha a conexão"""
         try:
             self.conn.close()
         except Exception as e:

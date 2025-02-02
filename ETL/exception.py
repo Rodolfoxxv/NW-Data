@@ -11,7 +11,7 @@ if not os.path.exists(csv_file):
     print(f"Arquivo CSV para a tabela '{table_name}' não encontrado.")
     exit()
 
-conn = duckdb.connect(database=r'D:\Projetos\NW-Data\data\database.duckdb')
+conn = duckdb.connect(database=r'Seu Caminho\data\database.duckdb')
 
 tabela_existe = conn.execute(
     f"SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '{table_name}'"
