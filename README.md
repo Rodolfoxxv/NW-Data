@@ -68,17 +68,15 @@
 ```text
 NW-Data/
 ├── app/
-│   └── duckdb_app.py  # Aplicação Streamlit para visualização de dados
+│   └── duckdb_app.py 
 ├── data/
-│   └── database.duckdb  # Banco de dados local DuckDB
-├── docs/
-│   └── index.rst  # Documentação gerada com Sphinx
+│   └── database.duckdb
 ├── ETL/
 │   └── ...  # Scripts de ETL
 ├── scripts/
-│   ├── incremental_loader.py  # Pipeline de carregamento incremental
+│   ├── incremental_loader.py  # Pipeline
 │   ├── .env  # Configuração do ambiente
-│   ├── requirements.txt  # Dependências do projeto
+│   └── ...  # Outros scripts
 ├── .venv/ 
 ├── .gitignore 
 ├── LICENSE 
