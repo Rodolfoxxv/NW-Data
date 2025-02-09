@@ -262,16 +262,26 @@ def processar_tabela(nome_tabela):
                 else:
                     logger.info("Tabela table_metadata: pulando etapa de metadados.")
     
-                # --- INSERÇÃO DOS DADOS ---
+                # --- INSERÇÃO DOS DADOS ---                
                 dados = conn_duckdb.execute(f"SELECT * FROM {nome_tabela}").fetchall()
                 colunas_nomes = [f'"{col}"' for col in duck_columns.keys()]
                 query_inserir = f"INSERT INTO {nome_tabela} ({', '.join(colunas_nomes)}) VALUES ({', '.join(['%s'] * len(colunas_nomes))})"
-    
+                query_verifica_existe = f"SELECT 1 FROM {nome_tabela} WHERE {colunas_nomes[0]} = %s LIMIT 1"
+
                 for linha in dados:
                     linha_convertida = [
                         mapear_tipo_duckdb_para_postgres(valor, duck_columns[col.strip('"')])
                         for valor, col in zip(linha, colunas_nomes)
                     ]
+                    
+                    # Verifica se a chave primária já existe
+                    chave_primaria = linha_convertida[0]
+                    cursor_supabase.execute(query_verifica_existe, (chave_primaria,))
+                    if cursor_supabase.fetchone():
+                        logger.info(f"Registro com chave {chave_primaria} já existe. Pulando inserção.")
+                        continue 
+
+                    # Se não existir insere os dados
                     cursor_supabase.execute(query_inserir, linha_convertida)
                 conn_supabase.commit()
     
