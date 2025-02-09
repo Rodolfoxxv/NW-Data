@@ -75,7 +75,6 @@ NW-Data/
 │   └── ...  # Scripts de ETL
 ├── scripts/
 │   ├── incremental_loader.py  # Pipeline
-│   ├── .env  # Configuração do ambiente
 │   └── ...  # Outros scripts
 ├── .venv/ 
 ├── .gitignore 

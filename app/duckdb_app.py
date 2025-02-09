@@ -6,24 +6,38 @@ import duckdb
 import os
 from pathlib import Path
 from dotenv import load_dotenv
+import streamlit as st
+import logging
+from contextlib import contextmanager
+from typing import List, Tuple
 
 # ========= Configuração do Ambiente =========
 load_dotenv()
 DUCKDB_PATH = os.getenv("DUCKDB_PATH")
-if DUCKDB_PATH is None:
-    st.error("DUCKDB_PATH não está definido no arquivo .env")
-    st.stop()
+DESTINATION_PATH = os.getenv("DESTINATION_PATH")
 
-full_duckdb_path = Path('Caminho do Projeto') / DUCKDB_PATH
+if not all([DUCKDB_PATH, DESTINATION_PATH]):
+    raise ValueError("Variáveis de ambiente ausentes. Verifique o arquivo .env.")
+
+# Converte DESTINATION_PATH para um objeto Path
+destination_path_obj = Path(DESTINATION_PATH)
+
+# Definir o caminho completo para o banco de dados usando DESTINATION_PATH
+full_duckdb_path = destination_path_obj / DUCKDB_PATH
 full_duckdb_path = full_duckdb_path.resolve()
+
+if not full_duckdb_path.is_file():
+    raise FileNotFoundError(f"Arquivo DuckDB não encontrado: {full_duckdb_path}")
+
+logging.info(f"DUCKDB_PATH: {full_duckdb_path}")
 
 # ========= Pipeline do DuckDB =========
 class DuckDBPipeline:
     def __init__(self, db_path: str):
+        # Certifique-se de que db_path seja uma string
         self.conn = duckdb.connect(db_path)
         self.create_metadata_table()
    
-    # Tabela que vai gerenciar os Schemas ****Importante pra usar no SupaBase e para o APP****
     def create_metadata_table(self):
         """Cria a tabela de metadados usando table_name como PRIMARY KEY."""
         self.conn.execute("""
@@ -33,6 +47,8 @@ class DuckDBPipeline:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
         """)
+
+
 # ========= CRUD =========
     def create_table_dynamic(self, table_name: str, fields: list):
         """Cria tabelas dinamicamente com base em um schema fornecido."""

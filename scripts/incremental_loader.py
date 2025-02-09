@@ -26,17 +26,20 @@ DB_NAME = os.getenv("DB_NAME")
 DB_USER = os.getenv("DB_USER")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_PORT = os.getenv("DB_PORT", "5432")
+DESTINATION_PATH = os.getenv("DESTINATION_PATH")
 
-if not all([SUPABASE_URL, SUPABASE_KEY, DUCKDB_PATH, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
+if not all([SUPABASE_URL, SUPABASE_KEY, DUCKDB_PATH, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DESTINATION_PATH]):
     raise ValueError("Variáveis de ambiente ausentes. Verifique o arquivo .env.")
 
-full_duckdb_path = Path("D:/Projetos/NW-Data/data") / DUCKDB_PATH
+destination_path_obj = Path(DESTINATION_PATH)
+
+full_duckdb_path = destination_path_obj / DUCKDB_PATH
 full_duckdb_path = full_duckdb_path.resolve()
 
 if not full_duckdb_path.is_file():
     raise FileNotFoundError(f"Arquivo DuckDB não encontrado: {full_duckdb_path}")
 
-logger.info(f"DUCKDB_PATH: {full_duckdb_path}")
+logging.info(f"DUCKDB_PATH: {full_duckdb_path}")
 
 conn_duckdb = duckdb.connect(str(full_duckdb_path))
 
