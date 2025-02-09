@@ -43,4 +43,4 @@ jobs:
       # Executa o script Python
       - name: Run incremental_loader.py
         run: |
-          python script/incremental_loader.py
+          python scripts/incremental_loader.py
