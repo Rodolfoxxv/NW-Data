@@ -120,14 +120,14 @@ def processar_tabela(nome_tabela):
                         nome_coluna = col[0]
                         tipo_duckdb = col[1]
                         tipo_postgres = mapear_tipo_duckdb_para_postgres_type(tipo_duckdb)
-                        colunas_supabase.append(f'"{nome_coluna}" {tipo_postgres}')
+                        colunas_supabase.append(f'"{nome_coluna}" {tipo_postgres}')  # Escapa o nome da coluna
 
                     # Obter as colunas da chave primária usando o PRAGMA do DuckDB
                     query_pk = f"SELECT name FROM pragma_table_info('{nome_tabela}') WHERE pk > 0 ORDER BY pk;"
                     pk_columns = conn_duckdb.execute(query_pk).fetchall()
                     pk_columns = [col[0] for col in pk_columns]
                     if pk_columns:
-                        pk_columns_escaped = [f'"{col}"' for col in pk_columns]
+                        pk_columns_escaped = [f'"{col}"' for col in pk_columns]  # Escapa as colunas da PK
                         pk_columns_str = ", ".join(pk_columns_escaped)
                         colunas_supabase.append(f"PRIMARY KEY ({pk_columns_str})")
 
@@ -158,7 +158,7 @@ def processar_tabela(nome_tabela):
                         pk_columns = conn_duckdb.execute(query_pk_duck).fetchall()
                         pk_columns = [col[0] for col in pk_columns]
                         if pk_columns:
-                            pk_columns_escaped = [f'"{col}"' for col in pk_columns]
+                            pk_columns_escaped = [f'"{col}"' for col in pk_columns]  # Escapa as colunas da PK
                             pk_columns_str = ", ".join(pk_columns_escaped)
                             alter_pk = f"ALTER TABLE {nome_tabela} ADD CONSTRAINT pk_{nome_tabela} PRIMARY KEY ({pk_columns_str});"
                             try:
@@ -177,8 +177,8 @@ def processar_tabela(nome_tabela):
                 # Obter dados da tabela no DuckDB
                 dados_duckdb = conn_duckdb.execute(f"SELECT * FROM {nome_tabela}").fetchall()
                 if dados_duckdb:
-                    # Obter nomes das colunas
-                    colunas = [col[0] for col in duck_schema]
+                    # Obter nomes das colunas e escapar palavras reservadas
+                    colunas = [f'"{col[0]}"' for col in duck_schema]  # Escapa todas as colunas
 
                     # Preparar a consulta de inserção no Supabase
                     query_insert = f"INSERT INTO {nome_tabela} ({', '.join(colunas)}) VALUES %s ON CONFLICT DO NOTHING"
