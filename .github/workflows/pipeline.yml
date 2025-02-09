@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - main
+    paths:
+      - 'scripts/incremental_loader.py'
+      - 'data/database.duckdb'
   workflow_dispatch:
 
 jobs:
@@ -27,7 +30,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           
-      # Configura variáveis de ambiente (se necessário)
+      # Configura variáveis de ambiente
       - name: Set up environment variables
         run: |
           echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> $GITHUB_ENV
