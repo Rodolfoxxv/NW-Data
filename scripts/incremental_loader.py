@@ -102,30 +102,29 @@ def processar_tabela(nome_tabela):
             host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT
         ) as conn_supabase:
             with conn_supabase.cursor() as cursor_supabase:
-                # Verifica se a tabela já foi migrada (pela presença na tabela de controle)
                 cursor_supabase.execute(
                     "SELECT EXISTS(SELECT 1 FROM controle_cargas WHERE tabela_nome = %s)",
                     (nome_tabela,),
                 )
                 existe = cursor_supabase.fetchone()[0]
 
-                # Obtém o schema do DuckDB via DESCRIBE
-                duck_schema = conn_duckdb.execute(f"DESCRIBE {nome_tabela}").fetchall()
-                duck_columns = {col[0]: col[1] for col in duck_schema}
+                query_schema_pk = f"""
+                    SELECT name, type, pk FROM pragma_table_info('{nome_tabela}')
+                    ORDER BY pk;
+                """
+                duck_info = conn_duckdb.execute(query_schema_pk).fetchall()
+
+                duck_columns = {col[0]: col[1] for col in duck_info}
+                pk_columns = [col[0] for col in duck_info if col[2] > 0]
 
                 if not existe:
-                    logger.info(f"Criando tabela {nome_tabela} no Supabase.")
                     colunas_supabase = []
-                    for col in duck_schema:
+                    for col in duck_info:
                         nome_coluna = col[0]
                         tipo_duckdb = col[1]
                         tipo_postgres = mapear_tipo_duckdb_para_postgres_type(tipo_duckdb)
                         colunas_supabase.append(f'"{nome_coluna}" {tipo_postgres}')
 
-                    # Obter as colunas da chave primária usando o PRAGMA do DuckDB
-                    query_pk = f"SELECT name FROM pragma_table_info('{nome_tabela}') WHERE pk > 0 ORDER BY pk;"
-                    pk_columns = conn_duckdb.execute(query_pk).fetchall()
-                    pk_columns = [col[0] for col in pk_columns]
                     if pk_columns:
                         pk_columns_escaped = [f'"{col}"' for col in pk_columns]
                         colunas_supabase.append(f"PRIMARY KEY ({', '.join(pk_columns_escaped)})")
@@ -133,159 +132,48 @@ def processar_tabela(nome_tabela):
                     query_criar_tabela_supabase = f"CREATE TABLE {nome_tabela} ({', '.join(colunas_supabase)})"
                     cursor_supabase.execute(query_criar_tabela_supabase)
                     conn_supabase.commit()
-                    logger.info(f"Tabela {nome_tabela} criada no Supabase.")
                     pk_definida = True
                 else:
-                    logger.info(f"Tabela {nome_tabela} já existe no Supabase. Verificando atualizações (constraints).")
-                    # Se a tabela já existe, verifica se possui PRIMARY KEY
                     query_pk_exists = """
                         SELECT COUNT(*) FROM information_schema.table_constraints 
                         WHERE table_name = %s AND constraint_type = 'PRIMARY KEY';
                     """
                     cursor_supabase.execute(query_pk_exists, (nome_tabela,))
                     pk_count = cursor_supabase.fetchone()[0]
-                    if pk_count == 0:
-                        # Obter a definição da PK a partir do DuckDB
-                        query_pk_duck = f"SELECT name FROM pragma_table_info('{nome_tabela}') WHERE pk > 0 ORDER BY pk;"
-                        pk_columns = conn_duckdb.execute(query_pk_duck).fetchall()
-                        pk_columns = [col[0] for col in pk_columns]
-                        if pk_columns:
-                            pk_columns_escaped = [f'"{col}"' for col in pk_columns]
-                            alter_pk = f'ALTER TABLE {nome_tabela} ADD CONSTRAINT pk_{nome_tabela} PRIMARY KEY ({", ".join(pk_columns_escaped)});'
-                            try:
-                                cursor_supabase.execute("SAVEPOINT sp_pk")
-                                cursor_supabase.execute(alter_pk)
-                                conn_supabase.commit()
-                                logger.info(f"Constraint PRIMARY KEY adicionada em {nome_tabela}: {pk_columns}")
-                                pk_definida = True
-                            except psycopg2.Error as e:
-                                cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_pk")
-                                conn_supabase.commit()
-                                logger.error(f"Erro ao adicionar PRIMARY KEY em {nome_tabela}: {e}")
-                                pk_definida = False
-                        else:
-                            logger.warning(f"Não foram encontradas colunas de PK em {nome_tabela} no DuckDB.")
+                    if pk_count == 0 and pk_columns:
+                        pk_columns_escaped = [f'"{col}"' for col in pk_columns]
+                        alter_pk = f'ALTER TABLE {nome_tabela} ADD CONSTRAINT pk_{nome_tabela} PRIMARY KEY ({', '.join(pk_columns_escaped)});'
+                        try:
+                            cursor_supabase.execute("SAVEPOINT sp_pk")
+                            cursor_supabase.execute(alter_pk)
+                            conn_supabase.commit()
+                            pk_definida = True
+                        except psycopg2.Error:
+                            cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_pk")
+                            conn_supabase.commit()
                             pk_definida = False
                     else:
                         pk_definida = True
 
-                # --- ATUALIZAÇÃO/ADIÇÃO DE CHAVES ESTRANGEIRAS A PARTIR DE table_metadata ---
-                # Se a tabela for "table_metadata", como ela já foi carregada (ou será carregada primeiro), não consultamos seus metadados
-                if nome_tabela != "table_metadata":
-                    query_metadados = f"SELECT schema_json FROM table_metadata WHERE table_name = %s"
-                    try:
-                        cursor_supabase.execute(query_metadados, (nome_tabela,))
-                        resultado = cursor_supabase.fetchone()
-                    except psycopg2.Error as e:
-                        logger.error(f"Erro ao consultar metadados para {nome_tabela}: {e}")
-                        resultado = None
+                cursor_supabase.execute(f"SELECT MAX({pk_columns[0]}) FROM {nome_tabela}")
+                ultima_chave = cursor_supabase.fetchone()[0] if pk_columns else None
 
-                    if resultado:
-                        schema_json_str = resultado[0]
-                        try:
-                            schema_dict = json.loads(schema_json_str)
-                        except json.JSONDecodeError as e:
-                            logger.error(f"Erro ao decodificar JSON dos metadados da tabela {nome_tabela}: {e}")
-                            schema_dict = {}
-    
-                        for nome_coluna, definicao in schema_dict.items():
-                            fk_def = definicao.get("foreign_key")
-                            if fk_def:
-                                # Tenta criar FK somente se a tabela referenciada possuir PK/unique
-                                tabela_ref = fk_def.get("table")
-                                coluna_ref = fk_def.get("column")
-                                on_update = fk_def.get("on_update", "NO ACTION")
-                                on_delete = fk_def.get("on_delete", "NO ACTION")
-                                constraint_name = f"fk_{nome_tabela}_{nome_coluna}_{tabela_ref}"
-    
-                                # Verifica se a constraint já existe no Supabase
-                                query_constraint = """
-                                    SELECT 1 FROM information_schema.table_constraints 
-                                    WHERE table_name = %s AND constraint_name = %s;
-                                """
-                                cursor_supabase.execute(query_constraint, (nome_tabela, constraint_name))
-                                if cursor_supabase.fetchone():
-                                    logger.info(f"Constraint {constraint_name} já existe em {nome_tabela}.")
-                                    continue
-    
-                                # Verifica se a tabela referenciada existe no Supabase
-                                query_table_exists = """
-                                    SELECT EXISTS(
-                                        SELECT 1 FROM information_schema.tables 
-                                        WHERE table_name = %s
-                                    );
-                                """
-                                cursor_supabase.execute(query_table_exists, (tabela_ref,))
-                                if not cursor_supabase.fetchone()[0]:
-                                    logger.info(
-                                        f"Tabela referenciada {tabela_ref} não existe no Supabase. FK {constraint_name} não será criada."
-                                    )
-                                    continue
-    
-                                # Verifica se a coluna de referência possui constraint única ou é PK
-                                query_unique = """
-                                    SELECT COUNT(*) 
-                                    FROM information_schema.table_constraints tc
-                                    JOIN information_schema.key_column_usage kcu
-                                      ON tc.constraint_name = kcu.constraint_name
-                                    WHERE tc.table_name = %s 
-                                      AND kcu.column_name = %s
-                                      AND (tc.constraint_type = 'PRIMARY KEY' OR tc.constraint_type = 'UNIQUE');
-                                """
-                                cursor_supabase.execute(query_unique, (tabela_ref, coluna_ref))
-                                unique_count = cursor_supabase.fetchone()[0]
-                                if unique_count == 0:
-                                    logger.error(
-                                        f"Não foi encontrada constraint única ou primary key para a coluna '{coluna_ref}' na tabela '{tabela_ref}'. FK {constraint_name} não será criada."
-                                    )
-                                    continue
-    
-                                fk_query = f"""
-                                    ALTER TABLE {nome_tabela}
-                                    ADD CONSTRAINT {constraint_name}
-                                    FOREIGN KEY ("{nome_coluna}")
-                                    REFERENCES {tabela_ref} ("{coluna_ref}")
-                                """
-                                if on_update.upper() != "NO ACTION":
-                                    fk_query += f" ON UPDATE {on_update}"
-                                if on_delete.upper() != "NO ACTION":
-                                    fk_query += f" ON DELETE {on_delete}"
-                                try:
-                                    cursor_supabase.execute(fk_query)
-                                    conn_supabase.commit()
-                                    logger.info(f"Constraint FK {constraint_name} adicionada em {nome_tabela}.")
-                                except psycopg2.Error as e:
-                                    logger.error(f"Erro ao adicionar FK {constraint_name} em {nome_tabela}: {e}")
-                                    conn_supabase.rollback()
-                    else:
-                        logger.warning(f"Metadados para a tabela {nome_tabela} não encontrados em Supabase.")
-                else:
-                    logger.info("Tabela table_metadata: pulando etapa de metadados.")
-    
-                # --- INSERÇÃO DOS DADOS ---                
-                dados = conn_duckdb.execute(f"SELECT * FROM {nome_tabela}").fetchall()
+                dados_query = f"SELECT * FROM {nome_tabela}"
+                if ultima_chave is not None:
+                    dados_query += f" WHERE {pk_columns[0]} > {ultima_chave}"
+                dados = conn_duckdb.execute(dados_query).fetchall()
+
                 colunas_nomes = [f'"{col}"' for col in duck_columns.keys()]
                 query_inserir = f"INSERT INTO {nome_tabela} ({', '.join(colunas_nomes)}) VALUES ({', '.join(['%s'] * len(colunas_nomes))})"
-                query_verifica_existe = f"SELECT 1 FROM {nome_tabela} WHERE {colunas_nomes[0]} = %s LIMIT 1"
 
                 for linha in dados:
                     linha_convertida = [
                         mapear_tipo_duckdb_para_postgres(valor, duck_columns[col.strip('"')])
                         for valor, col in zip(linha, colunas_nomes)
                     ]
-                    
-                    # Verifica se a chave primária já existe
-                    chave_primaria = linha_convertida[0]
-                    cursor_supabase.execute(query_verifica_existe, (chave_primaria,))
-                    if cursor_supabase.fetchone():
-                        logger.info(f"Registro com chave {chave_primaria} já existe. Pulando inserção.")
-                        continue 
-
-                    # Se não existir insere os dados
                     cursor_supabase.execute(query_inserir, linha_convertida)
                 conn_supabase.commit()
-    
-                # Atualiza a tabela de controle com a informação da carga
+
                 cursor_supabase.execute(
                     """
                     INSERT INTO controle_cargas (tabela_nome, ultima_carga, linhas_carregadas)
