@@ -181,7 +181,7 @@ def processar_tabela(nome_tabela):
                     colunas = [col[0] for col in duck_schema]
 
                     # Preparar a consulta de inserção no Supabase
-                    query_insert = f"INSERT INTO {nome_tabela} ({', '.join(colunas)}) VALUES %s"
+                    query_insert = f"INSERT INTO {nome_tabela} ({', '.join(colunas)}) VALUES %s ON CONFLICT DO NOTHING"
 
                     # Inserir dados em batch no Supabase
                     from psycopg2.extras import execute_values
