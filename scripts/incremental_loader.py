@@ -135,7 +135,14 @@ def processar_tabela(nome_tabela):
                     cursor_supabase.execute(query_criar_tabela_supabase)
                     conn_supabase.commit()
                     logger.info(f"Tabela {nome_tabela} criada no Supabase.")
-                    pk_definida = True
+
+                    # Registrar a criação da tabela na tabela de controle
+                    cursor_supabase.execute(
+                        "INSERT INTO controle_cargas (tabela_nome, ultima_carga, linhas_carregadas) VALUES (%s, %s, %s)",
+                        (nome_tabela, datetime.now(), 0),
+                    )
+                    conn_supabase.commit()
+
                 else:
                     logger.info(f"Tabela {nome_tabela} já existe no Supabase. Verificando atualizações (constraints).")
                     # Se a tabela já existe, verifica se possui PRIMARY KEY
@@ -159,43 +166,39 @@ def processar_tabela(nome_tabela):
                                 cursor_supabase.execute(alter_pk)
                                 conn_supabase.commit()
                                 logger.info(f"Constraint PRIMARY KEY adicionada em {nome_tabela}: {pk_columns}")
-                                pk_definida = True
                             except psycopg2.Error as e:
                                 cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_pk")
                                 conn_supabase.commit()
                                 logger.error(f"Erro ao adicionar PRIMARY KEY em {nome_tabela}: {e}")
-                                pk_definida = False
-                        else:
-                            logger.warning(f"Não foram encontradas colunas de PK em {nome_tabela} no DuckDB.")
-                            pk_definida = False
-                    else:
-                        pk_definida = True
 
-                # Carrega os dados da tabela do DuckDB
-                query_select_duckdb = f"SELECT * FROM {nome_tabela}"
-                dados_duckdb = conn_duckdb.execute(query_select_duckdb).fetchall()
-
-                # Insere os dados na tabela do Supabase
+                # Inserção de dados após criação da tabela
+                logger.info(f"Carregando dados para a tabela {nome_tabela}.")
+                
+                # Obter dados da tabela no DuckDB
+                dados_duckdb = conn_duckdb.execute(f"SELECT * FROM {nome_tabela}").fetchall()
                 if dados_duckdb:
-                    logger.info(f"Carregando dados para a tabela {nome_tabela}.")
+                    # Obter nomes das colunas
+                    colunas = [col[0] for col in duck_schema]
 
-                    colunas = [col[0] for col in duck_schema]  # Obtém os nomes das colunas
-                    query_insert = f"""
-                    INSERT INTO {nome_tabela} ({', '.join(colunas)}) 
-                    VALUES %s
-                    ON CONFLICT (table_name) DO NOTHING
-                    """
+                    # Preparar a consulta de inserção no Supabase
+                    query_insert = f"INSERT INTO {nome_tabela} ({', '.join(colunas)}) VALUES %s"
 
+                    # Inserir dados em batch no Supabase
                     from psycopg2.extras import execute_values
-                    execute_values(cursor_supabase, query_insert, dados_duckdb)
-                    conn_supabase.commit()
-                    logger.info(f"Dados carregados para a tabela {nome_tabela}.")
+                    try:
+                        execute_values(cursor_supabase, query_insert, dados_duckdb)
+                        conn_supabase.commit()
+                        logger.info(f"{len(dados_duckdb)} registros inseridos na tabela {nome_tabela}.")
+                    except Exception as e:
+                        conn_supabase.rollback()
+                        logger.error(f"Erro ao inserir dados na tabela {nome_tabela}: {e}")
+                        raise
                 else:
                     logger.warning(f"Não há dados para carregar na tabela {nome_tabela}.")
+
     except Exception as e:
         logger.error(f"Erro ao processar tabela {nome_tabela}: {e}")
         raise
-
 
 
 def ordenar_tabelas_topologicamente(tabelas, metadados):
