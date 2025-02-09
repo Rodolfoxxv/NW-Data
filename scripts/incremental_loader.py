@@ -102,91 +102,78 @@ def processar_tabela(nome_tabela):
             host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT
         ) as conn_supabase:
             with conn_supabase.cursor() as cursor_supabase:
+                # Verifica se a tabela já foi migrada (pela presença na tabela de controle)
                 cursor_supabase.execute(
                     "SELECT EXISTS(SELECT 1 FROM controle_cargas WHERE tabela_nome = %s)",
                     (nome_tabela,),
                 )
                 existe = cursor_supabase.fetchone()[0]
 
-                query_schema_pk = f"""
-                    SELECT name, type, pk FROM pragma_table_info('{nome_tabela}')
-                    ORDER BY pk;
-                """
-                duck_info = conn_duckdb.execute(query_schema_pk).fetchall()
-
-                duck_columns = {col[0]: col[1] for col in duck_info}
-                pk_columns = [col[0] for col in duck_info if col[2] > 0]
+                # Obtém o schema do DuckDB via DESCRIBE
+                duck_schema = conn_duckdb.execute(f"DESCRIBE {nome_tabela}").fetchall()
+                duck_columns = {col[0]: col[1] for col in duck_schema}
 
                 if not existe:
+                    logger.info(f"Criando tabela {nome_tabela} no Supabase.")
                     colunas_supabase = []
-                    for col in duck_info:
+                    for col in duck_schema:
                         nome_coluna = col[0]
                         tipo_duckdb = col[1]
                         tipo_postgres = mapear_tipo_duckdb_para_postgres_type(tipo_duckdb)
                         colunas_supabase.append(f'"{nome_coluna}" {tipo_postgres}')
 
+                    # Obter as colunas da chave primária usando o PRAGMA do DuckDB
+                    query_pk = f"SELECT name FROM pragma_table_info('{nome_tabela}') WHERE pk > 0 ORDER BY pk;"
+                    pk_columns = conn_duckdb.execute(query_pk).fetchall()
+                    pk_columns = [col[0] for col in pk_columns]
                     if pk_columns:
                         pk_columns_escaped = [f'"{col}"' for col in pk_columns]
-                        colunas_supabase.append(f"PRIMARY KEY ({', '.join(pk_columns_escaped)})")
+                        pk_columns_str = ", ".join(pk_columns_escaped)
+                        colunas_supabase.append(f"PRIMARY KEY ({pk_columns_str})")
 
                     query_criar_tabela_supabase = f"CREATE TABLE {nome_tabela} ({', '.join(colunas_supabase)})"
                     cursor_supabase.execute(query_criar_tabela_supabase)
                     conn_supabase.commit()
+                    logger.info(f"Tabela {nome_tabela} criada no Supabase.")
                     pk_definida = True
                 else:
+                    logger.info(f"Tabela {nome_tabela} já existe no Supabase. Verificando atualizações (constraints).")
+                    # Se a tabela já existe, verifica se possui PRIMARY KEY
                     query_pk_exists = """
                         SELECT COUNT(*) FROM information_schema.table_constraints 
                         WHERE table_name = %s AND constraint_type = 'PRIMARY KEY';
                     """
                     cursor_supabase.execute(query_pk_exists, (nome_tabela,))
                     pk_count = cursor_supabase.fetchone()[0]
-                    if pk_count == 0 and pk_columns:
-                        pk_columns_escaped = [f'"{col}"' for col in pk_columns]
-                        alter_pk = f'ALTER TABLE {nome_tabela} ADD CONSTRAINT pk_{nome_tabela} PRIMARY KEY ({', '.join(pk_columns_escaped)});'
-                        try:
-                            cursor_supabase.execute("SAVEPOINT sp_pk")
-                            cursor_supabase.execute(alter_pk)
-                            conn_supabase.commit()
-                            pk_definida = True
-                        except psycopg2.Error:
-                            cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_pk")
-                            conn_supabase.commit()
+                    if pk_count == 0:
+                        # Obter a definição da PK a partir do DuckDB
+                        query_pk_duck = f"SELECT name FROM pragma_table_info('{nome_tabela}') WHERE pk > 0 ORDER BY pk;"
+                        pk_columns = conn_duckdb.execute(query_pk_duck).fetchall()
+                        pk_columns = [col[0] for col in pk_columns]
+                        if pk_columns:
+                            pk_columns_escaped = [f'"{col}"' for col in pk_columns]
+                            pk_columns_str = ", ".join(pk_columns_escaped)
+                            alter_pk = f"ALTER TABLE {nome_tabela} ADD CONSTRAINT pk_{nome_tabela} PRIMARY KEY ({pk_columns_str});"
+                            try:
+                                cursor_supabase.execute("SAVEPOINT sp_pk")
+                                cursor_supabase.execute(alter_pk)
+                                conn_supabase.commit()
+                                logger.info(f"Constraint PRIMARY KEY adicionada em {nome_tabela}: {pk_columns}")
+                                pk_definida = True
+                            except psycopg2.Error as e:
+                                cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_pk")
+                                conn_supabase.commit()
+                                logger.error(f"Erro ao adicionar PRIMARY KEY em {nome_tabela}: {e}")
+                                pk_definida = False
+                        else:
+                            logger.warning(f"Não foram encontradas colunas de PK em {nome_tabela} no DuckDB.")
                             pk_definida = False
                     else:
                         pk_definida = True
-
-                cursor_supabase.execute(f"SELECT MAX({pk_columns[0]}) FROM {nome_tabela}")
-                ultima_chave = cursor_supabase.fetchone()[0] if pk_columns else None
-
-                dados_query = f"SELECT * FROM {nome_tabela}"
-                if ultima_chave is not None:
-                    dados_query += f" WHERE {pk_columns[0]} > {ultima_chave}"
-                dados = conn_duckdb.execute(dados_query).fetchall()
-
-                colunas_nomes = [f'"{col}"' for col in duck_columns.keys()]
-                query_inserir = f"INSERT INTO {nome_tabela} ({', '.join(colunas_nomes)}) VALUES ({', '.join(['%s'] * len(colunas_nomes))})"
-
-                for linha in dados:
-                    linha_convertida = [
-                        mapear_tipo_duckdb_para_postgres(valor, duck_columns[col.strip('"')])
-                        for valor, col in zip(linha, colunas_nomes)
-                    ]
-                    cursor_supabase.execute(query_inserir, linha_convertida)
-                conn_supabase.commit()
-
-                cursor_supabase.execute(
-                    """
-                    INSERT INTO controle_cargas (tabela_nome, ultima_carga, linhas_carregadas)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (tabela_nome)
-                    DO UPDATE SET ultima_carga = EXCLUDED.ultima_carga, linhas_carregadas = EXCLUDED.linhas_carregadas;
-                    """,
-                    (nome_tabela, datetime.now(), len(dados)),
-                )
-                conn_supabase.commit()
     except Exception as e:
         logger.error(f"Erro ao processar tabela {nome_tabela}: {e}")
         raise
+
 
 
 def ordenar_tabelas_topologicamente(tabelas, metadados):
