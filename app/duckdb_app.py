@@ -32,7 +32,7 @@ class DuckDBPipeline:
         self.sync_metadata_with_existing_tables()
 
     def create_metadata_tables(self):
-        # Tabela de metadados das tabelas (usa schema_json para armazenar o JSON de metadados)
+        
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS table_metadata (
@@ -41,7 +41,7 @@ class DuckDBPipeline:
             );
             """
         )
-        # Tabela de metadados das chaves estrangeiras
+
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS fk_metadata (
@@ -55,7 +55,6 @@ class DuckDBPipeline:
         )
 
     def sync_metadata_with_existing_tables(self):
-        # Lista todas as tabelas existentes, exceto as de metadados
         tables = self.conn.execute("SHOW TABLES").fetchall()
         for (table,) in tables:
             if table not in ("table_metadata", "fk_metadata"):
@@ -78,9 +77,8 @@ class DuckDBPipeline:
         metadata = {}
         pk_found = False
 
-        # Processa cada coluna
+
         for col in columns_info:
-            # PRAGMA table_info retorna: cid, name, type, notnull, dflt_value, pk
             col_name = col[1]
             data_type = col[2]
             is_pk = bool(col[5])

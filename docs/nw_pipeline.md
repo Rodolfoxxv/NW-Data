@@ -2,7 +2,8 @@
 
 ## Descrição Geral
 
-Este pipeline automatizado tem como objetivo migrar dados de um banco de dados DuckDB para um banco de dados PostgreSQL hospedado no Supabase. O código realiza as seguintes tarefas:
+Este pipeline automatizado tem como objetivo migrar dados de um banco de dados DuckDB para um banco de dados PostgreSQL em nuvem hospedado no Supabase.
+O código realiza as seguintes tarefas:
 
 - Carrega as variáveis de ambiente necessárias.
 - Estabelece conexões com o DuckDB e o Supabase.

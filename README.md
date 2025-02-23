@@ -27,6 +27,7 @@
 
    ```bash
    pip install uv
+   uv init
    uv venv
    ```
 
@@ -36,16 +37,16 @@
    uv sync
    ```
 
-### Se prefiri usar o pip
+4. **Se prefiri usar o pip**
 
-## Crie o ambiente virtual
+- Crie o ambiente virtual
 
   ```bash
    python -m venv
    Venv\Scripts\activate
   ```
 
-## Instale as dependencias
+- Instale as dependencias
 
    ```bash
    pip install -r requirements.txt
@@ -53,7 +54,9 @@
 
 ## Configuração
 
-1. **Crie um arquivo `.env` na pasta `scripts` e defina as variáveis de ambiente:**
+1. **Crie um arquivo `.env` na raiz do projeto e defina as variáveis de ambiente:**
+
+- Lembre de inserir o arquivo .env no .gitignore!!!
 
    ```ini
    DUCKDB_PATH=database.duckdb

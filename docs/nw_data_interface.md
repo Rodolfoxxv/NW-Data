@@ -102,7 +102,7 @@ if not all([DUCKDB_PATH, DESTINATION_PATH]):
 - Configuração de chaves primárias e estrangeiras
 - Upload de schema via arquivo JSON
 
-### Visualização de Dados
+- Visualização de Dados
 
 - Tabelas interativas com paginação
 - Filtros dinâmicos por coluna
