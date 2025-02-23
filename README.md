@@ -23,7 +23,7 @@
    cd NW-Data
    ```
 
-2. **Crie um ambiente virtual (opcional, mas recomendado):**
+2. **Crie um ambiente virtual opcional:**
 
    ```bash
    pip install uv
@@ -34,6 +34,21 @@
 
    ```bash
    uv sync
+   ```
+
+### Se prefiri usar o pip
+
+## Crie o ambiente virtual
+
+  ```bash
+   python -m venv
+   Venv\Scripts\activate
+  ```
+
+## Instale as dependencias
+
+   ```bash
+   pip install -r requirements.txt
    ```
 
 ## Configuração
@@ -51,17 +66,29 @@
 
 ## Uso
 
-1. **Execute o pipeline de carregamento incremental:**
-
-   ```bash
-   python scripts/incremental_loader.py
-   ```
-
-2. **Inicie a aplicação de visualização DuckDB com Streamlit:**
+1. **Inicie a aplicação de visualização DuckDB com Streamlit:**
 
    ```bash
    streamlit run app/duckdb_app.py
    ```
+
+2. **Variaveis secrets do Github**
+
+## Adicone as variaveis de ambiente no Github secrets
+
+```bash
+      - name: Set up environment variables
+        run: |
+          echo "SUPABASE_URL=${{ secrets.SUPABASE_URL }}" >> $GITHUB_ENV
+          echo "SUPABASE_KEY=${{ secrets.SUPABASE_KEY }}" >> $GITHUB_ENV
+          echo "DUCKDB_PATH=${{ secrets.DUCKDB_PATH }}" >> $GITHUB_ENV
+          echo "DB_HOST=${{ secrets.DB_HOST }}" >> $GITHUB_ENV
+          echo "DB_NAME=${{ secrets.DB_NAME }}" >> $GITHUB_ENV
+          echo "DB_USER=${{ secrets.DB_USER }}" >> $GITHUB_ENV
+          echo "DB_PASSWORD=${{ secrets.DB_PASSWORD }}" >> $GITHUB_ENV
+          echo "DB_PORT=${{ secrets.DB_PORT }}" >> $GITHUB_ENV
+          echo "DESTINATION_PATH=${{ secrets.DESTINATION_PATH }}" >> $GITHUB_ENV
+```
 
 ## Estrutura do Projeto
 
@@ -71,17 +98,17 @@ NW-Data/
 │   └── duckdb_app.py 
 ├── data/
 │   └── database.duckdb
+├── docs/
+│   └── nw_data_interface.md # Documentação da Interface Sreamlit x DuckDB
+│   └── nw_pipeline.md # Documentação do Pipeline
 ├── ETL/
 │   └── ...  # Scripts de ETL
 ├── scripts/
-│   ├── incremental_loader.py  # Pipeline
-│   └── ...  # Outros scripts
-├── .venv/ 
-├── .gitignore 
+│   └── incremental_loader.py 
 ├── LICENSE 
 ├── README.md
-├── pipeline.log 
-└── pyproject.toml
+└── pipeline.log 
+
 ```
 
 ## Contribuição

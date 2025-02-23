@@ -238,7 +238,7 @@ class DuckDBPipeline:
 pipeline = DuckDBPipeline(str(full_duckdb_path))
 
 # ========= Interface Streamlit =========
-st.title("📊 Interface de Gerenciamento de Dados (DuckDB)")
+st.title("📊 Interface DuckDB")
 
 # Menu lateral
 operation = st.sidebar.selectbox(
