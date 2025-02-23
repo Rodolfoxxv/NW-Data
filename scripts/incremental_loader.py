@@ -32,14 +32,11 @@ if not all([SUPABASE_URL, SUPABASE_KEY, DUCKDB_PATH, DB_HOST, DB_NAME, DB_USER, 
     raise ValueError("Variáveis de ambiente ausentes. Verifique o arquivo .env.")
 
 destination_path_obj = Path(DESTINATION_PATH)
-
-full_duckdb_path = destination_path_obj / DUCKDB_PATH
-full_duckdb_path = full_duckdb_path.resolve()
-
+full_duckdb_path = (destination_path_obj / DUCKDB_PATH).resolve()
 if not full_duckdb_path.is_file():
     raise FileNotFoundError(f"Arquivo DuckDB não encontrado: {full_duckdb_path}")
 
-logging.info(f"DUCKDB_PATH: {full_duckdb_path}")
+logger.info(f"DUCKDB_PATH: {full_duckdb_path}")
 
 conn_duckdb = duckdb.connect(str(full_duckdb_path))
 
@@ -120,14 +117,14 @@ def processar_tabela(nome_tabela):
                         nome_coluna = col[0]
                         tipo_duckdb = col[1]
                         tipo_postgres = mapear_tipo_duckdb_para_postgres_type(tipo_duckdb)
-                        colunas_supabase.append(f'"{nome_coluna}" {tipo_postgres}')  # Escapa o nome da coluna
+                        colunas_supabase.append(f'"{nome_coluna}" {tipo_postgres}')
 
-                    # Obter as colunas da chave primária usando o PRAGMA do DuckDB
+                    # Obter as colunas da chave primária usando PRAGMA do DuckDB
                     query_pk = f"SELECT name FROM pragma_table_info('{nome_tabela}') WHERE pk > 0 ORDER BY pk;"
                     pk_columns = conn_duckdb.execute(query_pk).fetchall()
                     pk_columns = [col[0] for col in pk_columns]
                     if pk_columns:
-                        pk_columns_escaped = [f'"{col}"' for col in pk_columns]  # Escapa as colunas da PK
+                        pk_columns_escaped = [f'"{col}"' for col in pk_columns]
                         pk_columns_str = ", ".join(pk_columns_escaped)
                         colunas_supabase.append(f"PRIMARY KEY ({pk_columns_str})")
 
@@ -136,16 +133,16 @@ def processar_tabela(nome_tabela):
                     conn_supabase.commit()
                     logger.info(f"Tabela {nome_tabela} criada no Supabase.")
 
-                    # Registrar a criação da tabela na tabela de controle
+                    # Registrar a criação na tabela de controle
                     cursor_supabase.execute(
                         "INSERT INTO controle_cargas (tabela_nome, ultima_carga, linhas_carregadas) VALUES (%s, %s, %s)",
                         (nome_tabela, datetime.now(), 0),
                     )
                     conn_supabase.commit()
-
                 else:
                     logger.info(f"Tabela {nome_tabela} já existe no Supabase. Verificando atualizações (constraints).")
-                    # Se a tabela já existe, verifica se possui PRIMARY KEY
+                    
+                    # Verificar e atualizar PRIMARY KEY se necessário
                     query_pk_exists = """
                         SELECT COUNT(*) FROM information_schema.table_constraints 
                         WHERE table_name = %s AND constraint_type = 'PRIMARY KEY';
@@ -153,12 +150,11 @@ def processar_tabela(nome_tabela):
                     cursor_supabase.execute(query_pk_exists, (nome_tabela,))
                     pk_count = cursor_supabase.fetchone()[0]
                     if pk_count == 0:
-                        # Obter a definição da PK a partir do DuckDB
                         query_pk_duck = f"SELECT name FROM pragma_table_info('{nome_tabela}') WHERE pk > 0 ORDER BY pk;"
                         pk_columns = conn_duckdb.execute(query_pk_duck).fetchall()
                         pk_columns = [col[0] for col in pk_columns]
                         if pk_columns:
-                            pk_columns_escaped = [f'"{col}"' for col in pk_columns]  # Escapa as colunas da PK
+                            pk_columns_escaped = [f'"{col}"' for col in pk_columns]
                             pk_columns_str = ", ".join(pk_columns_escaped)
                             alter_pk = f"ALTER TABLE {nome_tabela} ADD CONSTRAINT pk_{nome_tabela} PRIMARY KEY ({pk_columns_str});"
                             try:
@@ -170,20 +166,52 @@ def processar_tabela(nome_tabela):
                                 cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_pk")
                                 conn_supabase.commit()
                                 logger.error(f"Erro ao adicionar PRIMARY KEY em {nome_tabela}: {e}")
+                    
+                    # Verificar e atualizar FOREIGN KEY se necessário
+                    query_fk_duck = f"PRAGMA foreign_key_list('{nome_tabela}')"
+                    fk_info = conn_duckdb.execute(query_fk_duck).fetchall()
+                    if fk_info:
+                        # Consulta para obter as FKs já definidas no Supabase
+                        query_fk_exists = """
+                            SELECT kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name
+                            FROM information_schema.table_constraints AS tc
+                            JOIN information_schema.key_column_usage AS kcu
+                              ON tc.constraint_name = kcu.constraint_name
+                            JOIN information_schema.constraint_column_usage AS ccu
+                              ON ccu.constraint_name = tc.constraint_name
+                            WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_name = %s;
+                        """
+                        cursor_supabase.execute(query_fk_exists, (nome_tabela,))
+                        existing_fks = cursor_supabase.fetchall()  # (column, foreign_table, foreign_column)
+                        existing_fk_set = set(existing_fks)
+                        
+                        for fk in fk_info:
+                            # PRAGMA foreign_key_list retorna: id, seq, table, from, to, on_update, on_delete, match
+                            fk_column = fk[3]
+                            ref_table = fk[2]
+                            ref_column = fk[4]
+                            if (fk_column, ref_table, ref_column) not in existing_fk_set:
+                                alter_fk = f"""ALTER TABLE {nome_tabela} 
+                                    ADD CONSTRAINT fk_{nome_tabela}_{fk_column} 
+                                    FOREIGN KEY ("{fk_column}") 
+                                    REFERENCES {ref_table}("{ref_column}");"""
+                                try:
+                                    cursor_supabase.execute("SAVEPOINT sp_fk")
+                                    cursor_supabase.execute(alter_fk)
+                                    conn_supabase.commit()
+                                    logger.info(f"Constraint FOREIGN KEY adicionada em {nome_tabela}: (\"{fk_column}\") REFERENCES {ref_table}(\"{ref_column}\")")
+                                except psycopg2.Error as e:
+                                    cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_fk")
+                                    conn_supabase.commit()
+                                    logger.error(f"Erro ao adicionar FOREIGN KEY em {nome_tabela} para coluna {fk_column}: {e}")
 
-                # Inserção de dados após criação da tabela
+                # Inserção de dados após criação/atualização da tabela
                 logger.info(f"Carregando dados para a tabela {nome_tabela}.")
-                
-                # Obter dados da tabela no DuckDB
                 dados_duckdb = conn_duckdb.execute(f"SELECT * FROM {nome_tabela}").fetchall()
                 if dados_duckdb:
-                    # Obter nomes das colunas e escapar palavras reservadas
-                    colunas = [f'"{col[0]}"' for col in duck_schema]  # Escapa todas as colunas
-
-                    # Preparar a consulta de inserção no Supabase
+                    # Preparar os nomes das colunas escapadas
+                    colunas = [f'"{col[0]}"' for col in duck_schema]
                     query_insert = f"INSERT INTO {nome_tabela} ({', '.join(colunas)}) VALUES %s ON CONFLICT DO NOTHING"
-
-                    # Inserir dados em batch no Supabase
                     from psycopg2.extras import execute_values
                     try:
                         execute_values(cursor_supabase, query_insert, dados_duckdb)
@@ -195,7 +223,6 @@ def processar_tabela(nome_tabela):
                         raise
                 else:
                     logger.warning(f"Não há dados para carregar na tabela {nome_tabela}.")
-
     except Exception as e:
         logger.error(f"Erro ao processar tabela {nome_tabela}: {e}")
         raise
@@ -210,7 +237,6 @@ def ordenar_tabelas_topologicamente(tabelas, metadados):
     in_degree = {tabela: 0 for tabela in tabelas}
     
     for tabela in tabelas:
-        # Obtém as dependências a partir dos metadados, se disponíveis
         schema_json_str = metadados.get(tabela)
         dependencias = []
         if schema_json_str:
@@ -227,6 +253,7 @@ def ordenar_tabelas_topologicamente(tabelas, metadados):
                 grafo[dep].append(tabela)
                 in_degree[tabela] += 1
     
+    from collections import deque
     fila = deque([tabela for tabela in tabelas if in_degree[tabela] == 0])
     ordenadas = []
     
@@ -257,14 +284,13 @@ def main():
         tabelas_duckdb = conn_duckdb.execute("SHOW TABLES").fetchall()
         nomes_tabelas_duckdb = [tabela[0] for tabela in tabelas_duckdb]
     
-        # Se "table_metadata" estiver presente, processa-a primeiro
+        # Processa a tabela de metadados primeiro, se existir
         if "table_metadata" in nomes_tabelas_duckdb:
             logger.info("Processando tabela 'table_metadata' primeiro.")
             processar_tabela("table_metadata")
-            # Remover da lista para evitar processamento duplicado
             nomes_tabelas_duckdb.remove("table_metadata")
     
-        # Carregar os metadados do DuckDB (usados para ordenação) a partir da própria tabela "table_metadata"
+        # Carregar os metadados do DuckDB (para ordenação) a partir da tabela table_metadata
         metadados = {}
         try:
             resultados = conn_duckdb.execute("SELECT table_name, schema_json FROM table_metadata").fetchall()
