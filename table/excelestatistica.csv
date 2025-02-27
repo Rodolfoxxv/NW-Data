@@ -1,0 +1,91 @@
+﻿Aula;Nome;Tópico;Curso
+#F04;Aula 1: Variáveis;Estatística Descritiva;EstatisticaExel
+#F05;Aula 2: Medidas de Tendência Central;Estatística Descritiva;EstatisticaExel
+#F06;Aula 3: Histograma e Boxplot;Estatística Descritiva;EstatisticaExel
+#F07;Aula 4: Medidas de Dispersão;Estatística Descritiva;EstatisticaExel
+#F08;Aula 5: Covariância e Correlação;Estatística Descritiva;EstatisticaExel
+#F09;Aplicando com Excel;Estatística Descritiva;EstatisticaExel
+#F10;Aplicando com Excel;Estatística Descritiva;EstatisticaExel
+#F11;Aula 1: Probabilidade;Probabilidade e Distribuições;EstatisticaExel
+#F12;Aula 2: Propriedades e Regras;Probabilidade e Distribuições;EstatisticaExel
+#F13;Aula 3: Probabilidade Condicional;Probabilidade e Distribuições;EstatisticaExel
+#F14;Aula 4: Distribuições Discretas;Probabilidade e Distribuições;EstatisticaExel
+#F15;Aula 5: Distribuições Contínuas;Probabilidade e Distribuições;EstatisticaExel
+#F16;Aplicando com Excel;Probabilidade e Distribuições;EstatisticaExel
+#F17;Aula 1: Introdução à Inferência Estatística;Inferência Estatística;EstatisticaExel
+#F18;Aula 2: Distribuição Amostral;Inferência Estatística;EstatisticaExel
+#F19;Aula 3: Simulação;Inferência Estatística;EstatisticaExel
+#F20;Aula 4: Teorema Central do Limite;Inferência Estatística;EstatisticaExel
+#F21;Aula 5: TCL proporção;Inferência Estatística;EstatisticaExel
+#F22;Aula 1: Introdução ao Intervalo de Confiança;Intervalo de Confiança;EstatisticaExel
+#F23;Aula 2: IC da média (dp conhecido);Intervalo de Confiança;EstatisticaExel
+#F24;Aula 3: IC da média (dp desconhecido);Intervalo de Confiança;EstatisticaExel
+#F25;Aula 4: IC da proporção;Intervalo de Confiança;EstatisticaExel
+#F26;Aula 5: Amplitude e interpretação;Intervalo de Confiança;EstatisticaExel
+#F27;Aplicando com Excel;Intervalo de Confiança;EstatisticaExel
+#F28;Aula 1: Introdução ao Teste de Hipóteses;Teste de Hipóteses;EstatisticaExel
+#F29;Aula 2: Tipos de erros e alfa;Teste de Hipóteses;EstatisticaExel
+#F30;Aula 3: p-valor;Teste de Hipóteses;EstatisticaExel
+#F31;Aula 4: Tomada de Decisão;Teste de Hipóteses;EstatisticaExel
+#F32;Aula 5: Teste com duas amostras;Teste de Hipóteses;EstatisticaExel
+#F33;Aula 6: Pior tipo de erro;Teste de Hipóteses;EstatisticaExel
+#F34;Aplicando com Excel;Teste de Hipóteses;EstatisticaExel
+#F35;Aula 1: Introdução à Análise de Regressão;Regressão Linear;EstatisticaExel
+#F36;Aula 2: Regressão Linear Simples;Regressão Linear;EstatisticaExel
+#F37;Aula 3: Análise de Resíduos;Regressão Linear;EstatisticaExel
+#F38;Aula 4: Regressão Linear Múltipla;Regressão Linear;EstatisticaExel
+#F39;Aula 5: Inferência na Regressão;Regressão Linear;EstatisticaExel
+#F40;Aplicando com Excel;Regressão Linear;EstatisticaExel
+#F41;Aula 1: Verificando Suposições I;Regressão Linear + Logística;EstatisticaExel
+#F42;Aula 2: Verificando Suposições II;Regressão Linear + Logística;EstatisticaExel
+#F43;Aula 3: Variável Dummy I;Regressão Linear + Logística;EstatisticaExel
+#F44;Aula 4: Variável Dummy II;Regressão Linear + Logística;EstatisticaExel
+#F45;Aula 5: Regressão Logística;Regressão Linear + Logística;EstatisticaExel
+#F46 ;Aplicando com Excel 1;Regressão Linear + Logística;EstatisticaExel
+#F47;Aplicando com Excel 2;Regressão Linear + Logística;EstatisticaExel
+#F48;Aula 1: Recapitulando;ANOVA;EstatisticaExel
+#F49;Aula 2: Introdução;ANOVA;EstatisticaExel
+#F50;Aula 3: ANOVA 1 via;ANOVA;EstatisticaExel
+#F51;Aula 4: Testes post-hoc;ANOVA;EstatisticaExel
+#F52;Aula 5: ANOVA 2 vias;ANOVA;EstatisticaExel
+#F53;Aula 6: ANOVA com interação;ANOVA;EstatisticaExel
+#F54;Aplicando com Excel + SPSS 1;ANOVA;EstatisticaExel
+ #F55;Aplicando com Excel + SPSS 2;ANOVA;EstatisticaExel
+#F56;Aula 1: Introdução;Testes Não Paramétricos;EstatisticaExel
+#F57;Aula 2: 1 amostra;Testes Não Paramétricos;EstatisticaExel
+#F58;Aula 3: 2 amostras;Testes Não Paramétricos;EstatisticaExel
+#F59;Aula 4: 3+ amostras;Testes Não Paramétricos;EstatisticaExel
+#F60;Aula 5: Correlação Spearman;Testes Não Paramétricos;EstatisticaExel
+#F61;Aula 6: Dados ordinais pareados;Testes Não Paramétricos;EstatisticaExel
+#F62;Aplicando no R Studio;Testes Não Paramétricos;EstatisticaExel
+#F63;Workshop 1: Principais erros na Análise de Dados;Projetos;EstatisticaExel
+#F64;Workshop 2: Passo a passo de um projeto;Projetos;EstatisticaExel
+#F65;Workshop 3: Analisando dados na prática;Projetos;EstatisticaExel
+#F66;Aula 1: Começando + tabelas;Projetos;EstatisticaExel
+#F67;Aula 2: Gráficos + dicas;Projetos;EstatisticaExel
+#F68;Aula 3: Apresentando;Projetos;EstatisticaExel
+#F69;Boas-vindas e apresentação;Minicurso Power BI - Letícia Smireli;EstatisticaExel
+#F70;Aula 1: Introdução ao BI e Power BI;Minicurso Power BI - Letícia Smireli;EstatisticaExel
+#F71;Aula 2: Extração e tratamento de dados 1;Minicurso Power BI - Letícia Smireli;EstatisticaExel
+#F72;Aula 2: Extração e tratamento de dados 2;Minicurso Power BI - Letícia Smireli;EstatisticaExel
+#F73;Aula 3: Modelagem de dados + DAX;Minicurso Power BI - Letícia Smireli;EstatisticaExel
+ #F74;Aula 3: Modelagem de dados + DAX;Minicurso Power BI - Letícia Smireli;EstatisticaExel
+#F75;Aula 4: DataViz & Storytelling;Minicurso Power BI - Letícia Smireli;EstatisticaExel
+#F76;Introdução;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F77;Aula 00: Nivelamento Básico;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F78;Aula 01: Recursos Essenciais e Produtividade 1;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F79;Aula 01: Recursos Essenciais e Produtividade 2;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F80;Aula 02: Análise e Tratamento de Dados;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F81;Aula 03: Dashboards Profissionais 1;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F82;Aula 03: Dashboards Profissionais 2;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F83;Aula 04: Fórmulas e Recursos do Mercado 1;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F84;Aula 04: Fórmulas e Recursos do Mercado 2;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F85;Extra 01: Controle Financeiro;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F86;Extra 02: Teste de Competência no LinkedIn;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F87;Encerramento;Excel Express com Ítalo Teotônio;EstatisticaExel
+#F88;Aula 1; Introdução a Séries Temporais - James Sampaio;EstatisticaExel
+#F89;Aula 2; Introdução a Séries Temporais - James Sampaio;EstatisticaExel
+#F90;Aula 3; Introdução a Séries Temporais - James Sampaio;EstatisticaExel
+#F91;Aula 4; Introdução a Séries Temporais - James Sampaio;EstatisticaExel
+#F92;Aula 5; Introdução a Séries Temporais - James Sampaio;EstatisticaExel
+#F93;Aula 6; Introdução a Séries Temporais - James Sampaio;EstatisticaExel
