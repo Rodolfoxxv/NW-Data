@@ -5,8 +5,56 @@ import json
 import duckdb
 import os
 import logging
+import re
 from pathlib import Path
 from dotenv import load_dotenv
+
+# ===== Utilitários de Validação =====
+def sanitize_identifier(name: str) -> str:
+    """
+    Valida e sanitiza identificadores (nomes de tabelas/colunas).
+    Aceita apenas caracteres alfanuméricos e underscores.
+    """
+    if not name or not isinstance(name, str):
+        raise ValueError("Identificador inválido: deve ser uma string não vazia.")
+    
+    # Remove espaços em branco
+    name = name.strip()
+    
+    # Verifica se contém apenas caracteres válidos
+    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
+        raise ValueError(
+            f"Identificador inválido '{name}': deve começar com letra ou underscore "
+            "e conter apenas letras, números e underscores."
+        )
+    
+    # Previne palavras reservadas do SQL
+    reserved_words = {
+        'select', 'insert', 'update', 'delete', 'drop', 'create', 
+        'alter', 'table', 'from', 'where', 'union', 'exec', 'execute'
+    }
+    if name.lower() in reserved_words:
+        raise ValueError(f"Identificador '{name}' é uma palavra reservada do SQL.")
+    
+    return name
+
+def validate_data_type(data_type: str) -> str:
+    """
+    Valida tipos de dados permitidos no DuckDB.
+    """
+    allowed_types = {
+        'VARCHAR', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT',
+        'DOUBLE', 'FLOAT', 'DECIMAL', 'BOOLEAN', 'DATE', 
+        'TIMESTAMP', 'TIME', 'BLOB', 'TEXT'
+    }
+    
+    data_type = data_type.strip().upper()
+    base_type = data_type.split('(')[0]  # Remove parâmetros como VARCHAR(50)
+    
+    if base_type not in allowed_types:
+        raise ValueError(f"Tipo de dado '{data_type}' não permitido.")
+    
+    return data_type
 
 # ===== Configuração do Ambiente e Logging =====
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -66,6 +114,9 @@ class DuckDBPipeline:
                     self.register_table_metadata(table)
 
     def register_table_metadata(self, table_name: str):
+        # Valida o nome da tabela
+        table_name = sanitize_identifier(table_name)
+        
         # Obter estrutura da tabela
         columns_info = self.conn.execute(
             f"PRAGMA table_info('{table_name}')"
@@ -125,6 +176,12 @@ class DuckDBPipeline:
         logging.info(f"Metadados da tabela '{table_name}' sincronizados.")
 
     def create_table_dynamic(self, table_name: str, fields: list):
+        # Valida o nome da tabela
+        try:
+            table_name = sanitize_identifier(table_name)
+        except ValueError as e:
+            raise ValueError(f"Nome de tabela inválido: {e}")
+        
         # Verifica se a tabela já está registrada
         exists = self.conn.execute(
             "SELECT 1 FROM table_metadata WHERE table_name = ?",
@@ -141,7 +198,20 @@ class DuckDBPipeline:
             col_name = field.get("name")
             if not col_name:
                 raise ValueError("Cada campo deve ter um 'name' definido.")
+            
+            # Valida o nome da coluna
+            try:
+                col_name = sanitize_identifier(col_name)
+            except ValueError as e:
+                raise ValueError(f"Nome de coluna inválido '{col_name}': {e}")
+            
             data_type = field.get("data_type", "VARCHAR").strip() or "VARCHAR"
+            
+            # Valida o tipo de dado
+            try:
+                data_type = validate_data_type(data_type)
+            except ValueError as e:
+                raise ValueError(f"Tipo de dado inválido para coluna '{col_name}': {e}")
             col_def = f"{col_name} {data_type}"
             is_pk = field.get("primary_key", False)
             if is_pk:
@@ -158,6 +228,13 @@ class DuckDBPipeline:
                 fk_table = fk.get("table")
                 fk_column = fk.get("column")
                 if fk_table and fk_column:
+                    # Valida identificadores de FK
+                    try:
+                        fk_table = sanitize_identifier(fk_table)
+                        fk_column = sanitize_identifier(fk_column)
+                    except ValueError as e:
+                        raise ValueError(f"Identificador de FK inválido: {e}")
+                    
                     # Verifica se a tabela referenciada já existe nos metadados
                     ref_exists = self.conn.execute(
                         "SELECT 1 FROM table_metadata WHERE table_name = ?",

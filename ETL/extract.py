@@ -1,13 +1,27 @@
 import os
 import csv
 import re
+import logging
+from dotenv import load_dotenv
 
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-sql_path = r'Seu Caminho\northwind-data.sql'
+# Carregar variáveis de ambiente
+load_dotenv()
 
-output_dir = r'Seu Caminho\mywind-master\csv_output'
+sql_path = os.getenv('SQL_SOURCE_PATH')
+output_dir = os.getenv('CSV_OUTPUT_DIR', './csv_output')
+
+if not sql_path:
+    raise ValueError("Variável SQL_SOURCE_PATH não definida no arquivo .env")
 
 os.makedirs(output_dir, exist_ok=True)
+logger.info(f"Diretório de saída: {output_dir}")
 
 table_name_pattern = re.compile(r"Dumping data for table '(\w+)'")
 insert_pattern = re.compile(r"INSERT INTO `(\w+)` \((.+)\) VALUES (.+);")
@@ -40,7 +54,14 @@ def write_csv_files(output_dir, data):
             writer.writerow(rows[0][0])  # Escreve os cabeçalhos
             for columns, values in rows:
                 writer.writerow(values)
-        print(f'O arquivo CSV foi gerado para a tabela {table} em: {csv_path}')
+        logger.info(f'Arquivo CSV gerado para a tabela {table} em: {csv_path}')
 
-data = parse_sql_file(sql_path)
-write_csv_files(output_dir, data)
+if __name__ == "__main__":
+    try:
+        logger.info(f"Iniciando extração do arquivo SQL: {sql_path}")
+        data = parse_sql_file(sql_path)
+        write_csv_files(output_dir, data)
+        logger.info("Extração concluída com sucesso!")
+    except Exception as e:
+        logger.error(f"Erro durante a extração: {e}")
+        raise

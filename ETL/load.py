@@ -1,12 +1,35 @@
 import os
 import duckdb
 import pandas as pd
-import glob
-import csv
 import json
+import logging
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Configuração de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Carregar variáveis de ambiente
+load_dotenv()
 
 # Diretório dos arquivos CSV
-csv_dir = r'Seu Caminho\mywind-master\csv_output'
+csv_dir = os.getenv('CSV_OUTPUT_DIR', './csv_output')
+
+# Caminho do banco DuckDB
+duckdb_path = os.getenv('DUCKDB_PATH')
+destination_path = os.getenv('DESTINATION_PATH', '.')
+
+if not duckdb_path:
+    raise ValueError("Variável DUCKDB_PATH não definida no arquivo .env")
+
+full_duckdb_path = Path(destination_path) / duckdb_path
+full_duckdb_path = full_duckdb_path.resolve()
+
+logger.info(f"Conectando ao DuckDB: {full_duckdb_path}")
 
 # Caminho para o arquivo que armazena as tabelas já carregadas
 tabelas_carregadas_file = 'tabelas_carregadas.json'
@@ -47,7 +70,7 @@ tabelas_em_ordem = [
 ]
 
 # Conectar ao banco de dados DuckDB
-conn = duckdb.connect(database=r'D:\Projetos\NW-Data\data\database.duckdb')
+conn = duckdb.connect(database=str(full_duckdb_path))
 
 # Loop para carregar as tabelas na ordem especificada
 for table_name in tabelas_em_ordem:
@@ -57,10 +80,10 @@ for table_name in tabelas_em_ordem:
 
     csv_file = os.path.join(csv_dir, f'{table_name}.csv')
 
-    print(f"\nProcessando a tabela '{table_name}'...")
+    logger.info(f"Processando a tabela '{table_name}'...")
 
     if not os.path.exists(csv_file):
-        print(f"Arquivo CSV para a tabela '{table_name}' não encontrado. Pulando...")
+        logger.warning(f"Arquivo CSV para a tabela '{table_name}' não encontrado. Pulando...")
         continue
 
     try:
@@ -74,13 +97,13 @@ for table_name in tabelas_em_ordem:
             dtype=str  # Ler todos os campos como string inicialmente
         )
     except Exception as e:
-        print(f"Erro ao ler o arquivo CSV '{csv_file}': {e}")
+        logger.error(f"Erro ao ler o arquivo CSV '{csv_file}': {e}")
         continue
 
     # Verificar colunas da tabela existente no DuckDB
     columns_db = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
     if not columns_db:
-        print(f"Tabela '{table_name}' não existe no banco de dados.")
+        logger.error(f"Tabela '{table_name}' não existe no banco de dados.")
         continue
 
     columns_db_names = [col[1] for col in columns_db]
@@ -111,7 +134,7 @@ for table_name in tabelas_em_ordem:
     if primary_keys:
         df.dropna(subset=primary_keys, inplace=True)
     else:
-        print(f"Tabela '{table_name}' não possui chave primária definida. Pulando a remoção de NaNs.")
+        logger.warning(f"Tabela '{table_name}' não possui chave primária definida. Pulando a remoção de NaNs.")
 
     # Tentar inserir os dados na tabela real
     try:
@@ -125,7 +148,7 @@ for table_name in tabelas_em_ordem:
             SELECT * FROM {temp_table_name}
         """)
 
-        print(f"Tabela '{table_name}' carregada no DuckDB com sucesso.")
+        logger.info(f"Tabela '{table_name}' carregada no DuckDB com sucesso.")
 
         # Adicionar a tabela à lista de tabelas já carregadas
         tabelas_ja_carregadas.append(table_name)
@@ -135,10 +158,13 @@ for table_name in tabelas_em_ordem:
             json.dump(tabelas_ja_carregadas, f)
 
     except Exception as e:
-        print(f"Erro ao inserir dados na tabela '{table_name}': {e}")
+        logger.error(f"Erro ao inserir dados na tabela '{table_name}': {e}")
         # Salvar o DataFrame problemático para análise posterior
-        df.to_csv(f'error_{table_name}.csv', index=False, sep=';')
+        error_file = f'error_{table_name}.csv'
+        df.to_csv(error_file, index=False, sep=';')
+        logger.info(f"Dados com erro salvos em: {error_file}")
         continue  # Pular para a próxima tabela
 
 # Fechar a conexão
 conn.close()
+logger.info("Processo de carga concluído.")
