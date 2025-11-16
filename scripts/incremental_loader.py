@@ -87,6 +87,22 @@ conn_duckdb: Optional[duckdb.DuckDBPyConnection] = None
 RESOLVED_DB_HOST_IPV4: Optional[str] = None
 
 
+def _get_or_resolve_db_host_ipv4() -> Optional[str]:
+    """Resolve e armazena o IPv4 do host do banco para reutilizar posteriormente."""
+    global RESOLVED_DB_HOST_IPV4
+    if RESOLVED_DB_HOST_IPV4 or not DB_HOST:
+        return RESOLVED_DB_HOST_IPV4
+    try:
+        RESOLVED_DB_HOST_IPV4 = resolve_ipv4_address(DB_HOST)
+        logger.info(f"Hostname {DB_HOST} resolvido para IPv4 {RESOLVED_DB_HOST_IPV4}.")
+    except Exception as e:
+        logger.warning(
+            f"Não foi possível resolver IPv4 para {DB_HOST}. Prosseguindo sem hostaddr: {e}"
+        )
+        RESOLVED_DB_HOST_IPV4 = None
+    return RESOLVED_DB_HOST_IPV4
+
+
 def is_transient_supabase_error(error: Exception) -> bool:
     """Verifica se o erro indica uma queda temporária na conexão com o Supabase/Postgres."""
     msg = str(error).lower()
@@ -115,20 +131,31 @@ def get_postgres_connection_params() -> Dict[str, str]:
     if DB_SSLROOTCERT:
         params["sslrootcert"] = DB_SSLROOTCERT
     if DB_FORCE_IPV4 and DB_HOST:
-        global RESOLVED_DB_HOST_IPV4
-        if RESOLVED_DB_HOST_IPV4 is None:
-            try:
-                RESOLVED_DB_HOST_IPV4 = resolve_ipv4_address(DB_HOST)
-                logger.info(
-                    f"Hostname {DB_HOST} resolvido para IPv4 {RESOLVED_DB_HOST_IPV4}."
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Não foi possível resolver IPv4 para {DB_HOST}. Prosseguindo sem hostaddr: {e}"
-                )
-        if RESOLVED_DB_HOST_IPV4:
-            params["hostaddr"] = RESOLVED_DB_HOST_IPV4
+        ipv4 = _get_or_resolve_db_host_ipv4()
+        if ipv4:
+            params["hostaddr"] = ipv4
     return params
+
+
+def conectar_supabase() -> psycopg2.extensions.connection:
+    """Abre conexão com supabase, forçando IPv4 automaticamente em caso de falha IPv6."""
+    params = get_postgres_connection_params()
+    try:
+        return psycopg2.connect(**params)
+    except psycopg2.OperationalError as e:
+        msg = str(e).lower()
+        if params.get("hostaddr") or not DB_HOST:
+            raise
+        if ("network is unreachable" not in msg) and ("no route to host" not in msg):
+            raise
+        ipv4 = _get_or_resolve_db_host_ipv4()
+        if not ipv4:
+            raise
+        logger.warning(
+            f"Falha ao conectar usando IPv6 ({e}). Tentando novamente com IPv4 {ipv4}."
+        )
+        params["hostaddr"] = ipv4
+        return psycopg2.connect(**params)
 
 
 def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
@@ -336,7 +363,7 @@ def executar_operacao_supabase(
 
 def _processar_tabela_once(nome_tabela: str) -> None:
     """Executa uma única tentativa de processamento (criar/atualizar) da tabela destino."""
-    with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
+    with conectar_supabase() as conn_supabase:
         with conn_supabase.cursor() as cursor_supabase:
             ini = datetime.now()
 
@@ -525,7 +552,7 @@ def ordenar_tabelas_topologicamente(
 def main() -> None:
     try:
         def inicializar_tabela_controle() -> None:
-            with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
+            with conectar_supabase() as conn_supabase:
                 with conn_supabase.cursor() as cursor_supabase:
                     criar_tabela_controle(cursor_supabase)
 
