@@ -7,7 +7,9 @@ from dotenv import load_dotenv
 import os
 from pathlib import Path
 from collections import defaultdict, deque
+from typing import Dict, List, Optional, Sequence, Tuple
 from psycopg2.extras import execute_values
+from psycopg2 import sql
 
 # Configuração do logging
 logging.basicConfig(
@@ -19,8 +21,8 @@ logger = logging.getLogger(__name__)
 
 # Carregar variáveis de ambiente
 load_dotenv()
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+
+
 DUCKDB_PATH = os.getenv("DUCKDB_PATH")
 DB_HOST = os.getenv("DB_HOST")
 DB_NAME = os.getenv("DB_NAME")
@@ -29,70 +31,158 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_PORT = os.getenv("DB_PORT", "5432")
 DESTINATION_PATH = os.getenv("DESTINATION_PATH")
 TRUNCATE_BEFORE_LOAD = os.getenv("TRUNCATE_BEFORE_LOAD", "false").lower() == "true"
-
-if not all([SUPABASE_URL, SUPABASE_KEY, DUCKDB_PATH, DB_HOST, DB_NAME, DB_USER, DB_PASSWORD, DESTINATION_PATH]):
-    raise ValueError("Variáveis de ambiente ausentes. Verifique o arquivo .env.")
-
-destination_path_obj = Path(DESTINATION_PATH)
-full_duckdb_path = (destination_path_obj / DUCKDB_PATH).resolve()
-if not full_duckdb_path.is_file():
-    raise FileNotFoundError(f"Arquivo DuckDB não encontrado: {full_duckdb_path}")
-
-logger.info(f"DUCKDB_PATH: {full_duckdb_path}")
-
-conn_duckdb = duckdb.connect(str(full_duckdb_path))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "5000"))
+INCREMENTAL_TIMESTAMP_COLUMN = os.getenv("INCREMENTAL_TIMESTAMP_COLUMN")
+DB_SSLMODE = os.getenv("DB_SSLMODE")
+DB_SSLROOTCERT = os.getenv("DB_SSLROOTCERT")
+if DB_SSLROOTCERT:
+    DB_SSLROOTCERT = str(Path(DB_SSLROOTCERT).expanduser())
 
 
-def mapear_tipo_duckdb_para_postgres_type(tipo_duckdb):
+TIMESTAMP_CANDIDATES = [
+    "updated_at",
+    "updated_on",
+    "modified_at",
+    "modified_on",
+    "last_update",
+    "last_updated",
+    "created_at",
+    "created_on",
+    "ts_update",
+    "dt_update",
+    "ultima_atualizacao",
+    "data_atualizacao",
+]
+
+REQUIRED_ENV_VARS = [
+    ("DUCKDB_PATH", DUCKDB_PATH),
+    ("DB_HOST", DB_HOST),
+    ("DB_NAME", DB_NAME),
+    ("DB_USER", DB_USER),
+    ("DB_PASSWORD", DB_PASSWORD),
+    ("DESTINATION_PATH", DESTINATION_PATH),
+]
+
+missing_vars = [name for name, value in REQUIRED_ENV_VARS if not value]
+if missing_vars:
+    raise ValueError(
+        "Variáveis de ambiente ausentes. Verifique o arquivo .env: "
+        + ", ".join(missing_vars)
+    )
+
+conn_duckdb: Optional[duckdb.DuckDBPyConnection] = None
+
+
+def get_postgres_connection_params() -> Dict[str, str]:
+    """Monta os parâmetros de conexão ao Postgres/Supabase, incluindo SSL se configurado."""
+    params: Dict[str, str] = {
+        "host": DB_HOST,
+        "database": DB_NAME,
+        "user": DB_USER,
+        "password": DB_PASSWORD,
+        "port": DB_PORT,
+    }
+    if DB_SSLMODE:
+        params["sslmode"] = DB_SSLMODE
+    if DB_SSLROOTCERT:
+        params["sslrootcert"] = DB_SSLROOTCERT
+    return params
+
+
+def get_duckdb_connection() -> duckdb.DuckDBPyConnection:
+    """Abre (ou reutiliza) a conexão com o arquivo DuckDB."""
+    global conn_duckdb
+    if conn_duckdb is None:
+        destination_path_obj = Path(DESTINATION_PATH)
+        full_duckdb_path = (destination_path_obj / DUCKDB_PATH).resolve()
+        if not full_duckdb_path.is_file():
+            raise FileNotFoundError(f"Arquivo DuckDB não encontrado: {full_duckdb_path}")
+        logger.info(f"Conectando ao DuckDB em: {full_duckdb_path}")
+        conn_duckdb = duckdb.connect(str(full_duckdb_path))
+    return conn_duckdb
+
+
+def close_duckdb_connection() -> None:
+    """Fecha a conexão global com o DuckDB."""
+    global conn_duckdb
+    if conn_duckdb is not None:
+        conn_duckdb.close()
+        conn_duckdb = None
+        logger.info("Conexão DuckDB encerrada.")
+
+
+def mapear_tipo_duckdb_para_postgres_type(tipo_duckdb: str) -> str:
+    """Mapeia tipos DuckDB para tipos equivalentes do Postgres."""
     tipo = tipo_duckdb.upper()
-    if 'TINYINT' in tipo:
-        return 'SMALLINT'
-    elif 'BLOB' in tipo:
-        return 'BYTEA'
-    elif 'DOUBLE' in tipo:
-        return 'DOUBLE PRECISION'
-    elif 'DECIMAL' in tipo:
-        return 'NUMERIC' + tipo.split('DECIMAL')[1]
-    else:
-        return tipo
+    if "TINYINT" in tipo:
+        return "SMALLINT"
+    if "BLOB" in tipo:
+        return "BYTEA"
+    if "DOUBLE" in tipo:
+        return "DOUBLE PRECISION"
+    if "DECIMAL" in tipo:
+        return "NUMERIC" + tipo.split("DECIMAL")[1]
+    return tipo
 
 
-def criar_tabela_controle(cursor_supabase):
-    tabela_controle = "controle_cargas"
-    query = f"""
-    CREATE TABLE IF NOT EXISTS {tabela_controle} (
-        tabela_nome TEXT PRIMARY KEY,
-        ultima_carga TIMESTAMP,
-        linhas_carregadas INT
-    );
-    """
+def criar_tabela_controle(cursor_supabase) -> None:
+    """Cria a tabela de controle se não existir."""
+    tabela_controle = sql.Identifier("controle_cargas")
+    query = sql.SQL(
+        """
+        CREATE TABLE IF NOT EXISTS {tabela} (
+            tabela_nome TEXT PRIMARY KEY,
+            ultima_carga TIMESTAMP,
+            linhas_carregadas INT
+        );
+        """
+    ).format(tabela=tabela_controle)
     cursor_supabase.execute(query)
-    logger.info(f"Tabela de controle '{tabela_controle}' criada ou verificada.")
+    logger.info("Tabela de controle 'controle_cargas' criada ou verificada.")
 
 
-def get_duckdb_table_schema(nome_tabela):
-    """
-    Obtém o schema da tabela a partir de DESCRIBE e PRAGMA table_info.
-    Retorna:
-      - duck_schema: lista de tuplas com (coluna, tipo, ...)
-      - pk_columns: lista de nomes de colunas que são PK.
-    """
-    duck_schema = conn_duckdb.execute(f"DESCRIBE {nome_tabela}").fetchall()
-    pk_info = conn_duckdb.execute(f"PRAGMA table_info('{nome_tabela}')").fetchall()
+def get_duckdb_table_schema(nome_tabela: str) -> Tuple[List[Tuple], List[str]]:
+    """Obtém o schema da tabela (DESCRIBE) e colunas PK (PRAGMA table_info)."""
+    conn = get_duckdb_connection()
+    duck_schema = conn.execute(f"DESCRIBE {nome_tabela}").fetchall()
+    pk_info = conn.execute(f"PRAGMA table_info('{nome_tabela}')").fetchall()
     pk_columns = [row[1] for row in pk_info if row[5] > 0]  # row[5]: indicador de PK
     return duck_schema, pk_columns
 
 
-def get_duckdb_fk_info(nome_tabela):
-    """
-    Tenta recuperar as informações de FK a partir da tabela de metadados (schema_json).
-    Espera que o schema_json contenha, para cada coluna, um dicionário com a chave 'foreign_key'
-    contendo {'table': <tabela_referenciada>, 'column': <coluna_referenciada>}.
-    Retorna uma lista de tuplas: (coluna, tabela_referenciada, coluna_referenciada).
-    """
-    fk_info = []
+def detectar_coluna_timestamp_incremental(nome_tabela: str) -> Optional[str]:
+    """Tenta detectar automaticamente uma coluna de timestamp para carga incremental."""
+    conn = get_duckdb_connection()
+    info = conn.execute(f"PRAGMA table_info('{nome_tabela}')").fetchall()
+    cols: List[Tuple[int, str, str]] = [(row[0], row[1], (row[2] or "").upper()) for row in info]
+
+    def pick_by_names(candidates: Sequence[str], types_ok: Sequence[str]) -> Optional[str]:
+        cand_lower = [c.lower() for c in candidates]
+        for _, name, dtype in cols:
+            if dtype.split("(")[0] in types_ok and name.lower() in cand_lower:
+                return name
+        return None
+
+    col = pick_by_names(TIMESTAMP_CANDIDATES, ("TIMESTAMP",))
+    if col:
+        return col
+    for _, name, dtype in cols:
+        if dtype.split("(")[0] == "TIMESTAMP":
+            return name
+    col = pick_by_names(TIMESTAMP_CANDIDATES, ("DATE",))
+    if col:
+        return col
+    return None
+
+
+def get_duckdb_fk_info(nome_tabela: str) -> List[Tuple[str, str, str]]:
+    """Recupera informações de FK a partir da tabela table_metadata, se houver."""
+    fk_info: List[Tuple[str, str, str]] = []
     try:
-        result = conn_duckdb.execute(f"SELECT schema_json FROM table_metadata WHERE table_name = '{nome_tabela}'").fetchone()
+        conn = get_duckdb_connection()
+        result = conn.execute(
+            f"SELECT schema_json FROM table_metadata WHERE table_name = '{nome_tabela}'"
+        ).fetchone()
         if result:
             schema_json = json.loads(result[0])
             for col, definicao in schema_json.items():
@@ -104,61 +194,89 @@ def get_duckdb_fk_info(nome_tabela):
     return fk_info
 
 
-def verificar_e_corrigir_constraints(cursor_supabase, nome_tabela, duck_pk_columns, duck_fk_info):
-    # Verificar e atualizar PRIMARY KEY
-    cursor_supabase.execute(f"""
+def verificar_e_corrigir_constraints(
+    cursor_supabase,
+    nome_tabela: str,
+    duck_pk_columns: List[str],
+    duck_fk_info: List[Tuple[str, str, str]],
+) -> None:
+    """Sincroniza PK e FK no Postgres de acordo com o que existe no DuckDB."""
+    cursor_supabase.execute(
+        """
         SELECT kcu.column_name FROM information_schema.table_constraints tc
         JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
         WHERE tc.table_name = %s AND tc.constraint_type = 'PRIMARY KEY';
-    """, (nome_tabela,))
+        """,
+        (nome_tabela,),
+    )
     supabase_pk = [row[0] for row in cursor_supabase.fetchall()]
     if set(duck_pk_columns) != set(supabase_pk):
         try:
-            cursor_supabase.execute(f"ALTER TABLE {nome_tabela} DROP CONSTRAINT IF EXISTS pk_{nome_tabela};")
+            cursor_supabase.execute(
+                sql.SQL("ALTER TABLE {} DROP CONSTRAINT IF EXISTS {};").format(
+                    sql.Identifier(nome_tabela), sql.Identifier(f"pk_{nome_tabela}")
+                )
+            )
         except Exception as e:
             logger.warning(f"Erro ao remover PK antiga em {nome_tabela}: {e}")
         if duck_pk_columns:
-            pk_cols_str = ", ".join([f'\"{col}\"' for col in duck_pk_columns])
-            alter_pk = f"ALTER TABLE {nome_tabela} ADD CONSTRAINT pk_{nome_tabela} PRIMARY KEY ({pk_cols_str});"
-            cursor_supabase.execute(alter_pk)
+            query = sql.SQL("ALTER TABLE {} ADD CONSTRAINT {} PRIMARY KEY ({});").format(
+                sql.Identifier(nome_tabela),
+                sql.Identifier(f"pk_{nome_tabela}"),
+                sql.SQL(", ").join([sql.Identifier(col) for col in duck_pk_columns]),
+            )
+            cursor_supabase.execute(query)
             logger.info(f"PK atualizada para {nome_tabela}: {duck_pk_columns}")
 
-    # Verificar e atualizar FOREIGN KEYS
-    cursor_supabase.execute(f"""
+    cursor_supabase.execute(
+        """
         SELECT kcu.column_name, ccu.table_name, ccu.column_name
         FROM information_schema.table_constraints tc
         JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
         JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name = tc.constraint_name
         WHERE tc.table_name = %s AND tc.constraint_type = 'FOREIGN KEY';
-    """, (nome_tabela,))
-    supabase_fks = cursor_supabase.fetchall()  # tuples: (coluna, tabela_ref, coluna_ref)
+        """,
+        (nome_tabela,),
+    )
+    supabase_fks = cursor_supabase.fetchall()
     supabase_fk_set = set(supabase_fks)
-    for fk in duck_fk_info:
-        if fk not in supabase_fk_set:
-            constraint_name = f"fk_{nome_tabela}_{fk[0]}"
-            alter_fk = (f"ALTER TABLE {nome_tabela} ADD CONSTRAINT {constraint_name} "
-                        f"FOREIGN KEY (\"{fk[0]}\") REFERENCES {fk[1]}(\"{fk[2]}\");")
+    for fk_col, ref_table, ref_col in duck_fk_info:
+        if (fk_col, ref_table, ref_col) not in supabase_fk_set:
+            constraint_name = f"fk_{nome_tabela}_{fk_col}"
             try:
                 cursor_supabase.execute("SAVEPOINT sp_fk")
-                cursor_supabase.execute(alter_fk)
-                logger.info(f"FK adicionada em {nome_tabela}: {fk[0]} -> {fk[1]}({fk[2]})")
+                query = sql.SQL(
+                    "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {}({});"
+                ).format(
+                    sql.Identifier(nome_tabela),
+                    sql.Identifier(constraint_name),
+                    sql.Identifier(fk_col),
+                    sql.Identifier(ref_table),
+                    sql.Identifier(ref_col),
+                )
+                cursor_supabase.execute(query)
+                logger.info(
+                    f"FK adicionada em {nome_tabela}: {fk_col} -> {ref_table}({ref_col})"
+                )
             except Exception as e:
                 cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_fk")
-                logger.error(f"Erro ao adicionar FK em {nome_tabela} para coluna {fk[0]}: {e}")
+                logger.error(f"Erro ao adicionar FK em {nome_tabela} para coluna {fk_col}: {e}")
 
 
-def processar_tabela(nome_tabela):
+def processar_tabela(nome_tabela: str) -> None:
+    """Processa (cria/atualiza) uma tabela específica no destino."""
     try:
-        with psycopg2.connect(
-            host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT
-        ) as conn_supabase:
+        with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
             with conn_supabase.cursor() as cursor_supabase:
-                # Verifica se a tabela já foi migrada (verificando a tabela de controle)
+                ini = datetime.now()
+
                 cursor_supabase.execute(
-                    "SELECT EXISTS(SELECT 1 FROM controle_cargas WHERE tabela_nome = %s)",
+                    "SELECT ultima_carga, linhas_carregadas FROM controle_cargas WHERE tabela_nome = %s",
                     (nome_tabela,),
                 )
-                existe = cursor_supabase.fetchone()[0]
+                row_ctrl = cursor_supabase.fetchone()
+                existe = row_ctrl is not None
+                ultima_carga_prev: Optional[datetime] = row_ctrl[0] if row_ctrl else None
 
                 duck_schema, duck_pk_columns = get_duckdb_table_schema(nome_tabela)
                 duck_fk_info = get_duckdb_fk_info(nome_tabela)
@@ -168,63 +286,121 @@ def processar_tabela(nome_tabela):
                     colunas_supabase = []
                     for col in duck_schema:
                         tipo_postgres = mapear_tipo_duckdb_para_postgres_type(col[1])
-                        colunas_supabase.append(f"\"{col[0]}\" {tipo_postgres}")
+                        colunas_supabase.append(f'"{col[0]}" {tipo_postgres}')
                     if duck_pk_columns:
-                        pk_cols_str = ", ".join([f"\"{col}\"" for col in duck_pk_columns])
+                        pk_cols_str = ", ".join([f'"{col}"' for col in duck_pk_columns])
                         colunas_supabase.append(f"PRIMARY KEY ({pk_cols_str})")
-                    query_criar = f"CREATE TABLE {nome_tabela} ({', '.join(colunas_supabase)});"
+                    query_criar = (
+                        f"CREATE TABLE {nome_tabela} ({', '.join(colunas_supabase)});"
+                    )
                     cursor_supabase.execute(query_criar)
                     conn_supabase.commit()
                     logger.info(f"Tabela {nome_tabela} criada no Supabase.")
                     cursor_supabase.execute(
                         "INSERT INTO controle_cargas (tabela_nome, ultima_carga, linhas_carregadas) VALUES (%s, %s, %s)",
-                        (nome_tabela, datetime.now(), 0),
+                        (nome_tabela, None, 0),
                     )
                     conn_supabase.commit()
                 else:
-                    logger.info(f"Tabela {nome_tabela} já existe no Supabase. Verificando constraints...")
-                    verificar_e_corrigir_constraints(cursor_supabase, nome_tabela, duck_pk_columns, duck_fk_info)
+                    logger.info(
+                        f"Tabela {nome_tabela} já existe no Supabase. Verificando constraints..."
+                    )
+                    verificar_e_corrigir_constraints(
+                        cursor_supabase, nome_tabela, duck_pk_columns, duck_fk_info
+                    )
 
-                # Se a variável de ambiente indicar, realiza TRUNCATE antes de inserir os dados
                 if TRUNCATE_BEFORE_LOAD:
-                    cursor_supabase.execute(f"TRUNCATE TABLE {nome_tabela} RESTART IDENTITY CASCADE;")
+                    cursor_supabase.execute(
+                        f"TRUNCATE TABLE {nome_tabela} RESTART IDENTITY CASCADE;"
+                    )
                     conn_supabase.commit()
                     logger.info(f"Tabela {nome_tabela} truncada com sucesso.")
 
-                # Carrega os dados do DuckDB
-                dados = conn_duckdb.execute(f"SELECT * FROM {nome_tabela}").fetchall()
-                if dados:
-                    col_names = [f"\"{col[0]}\"" for col in duck_schema]
-                    query_insert = f"INSERT INTO {nome_tabela} ({', '.join(col_names)}) VALUES %s ON CONFLICT DO NOTHING"
+                ts_col = INCREMENTAL_TIMESTAMP_COLUMN or detectar_coluna_timestamp_incremental(
+                    nome_tabela
+                )
+                if TRUNCATE_BEFORE_LOAD:
+                    ultima_carga_prev = None
+
+                if ts_col and ultima_carga_prev is not None:
+                    query_duck = f"SELECT * FROM {nome_tabela} WHERE {ts_col} > ?"
+                    params = [ultima_carga_prev]
+                else:
+                    query_duck = f"SELECT * FROM {nome_tabela}"
+                    params: List[datetime] = []
+
+                col_names = [f'"{col[0]}"' for col in duck_schema]
+                query_insert = (
+                    f"INSERT INTO {nome_tabela} ({', '.join(col_names)}) VALUES %s ON CONFLICT DO NOTHING"
+                )
+
+                total_inseridos = 0
+                max_ts: Optional[datetime] = ultima_carga_prev
+
+                conn_duck = get_duckdb_connection()
+                duck_cursor = conn_duck.execute(query_duck, params)
+                while True:
+                    lote = duck_cursor.fetchmany(BATCH_SIZE)
+                    if not lote:
+                        break
                     try:
-                        execute_values(cursor_supabase, query_insert, dados)
+                        execute_values(
+                            cursor_supabase,
+                            query_insert,
+                            lote,
+                            page_size=BATCH_SIZE,
+                        )
                         conn_supabase.commit()
-                        logger.info(f"{len(dados)} registros inseridos na tabela {nome_tabela}.")
+                        total_inseridos += len(lote)
+                        if ts_col:
+                            idx_ts = next(
+                                (i for i, c in enumerate(duck_schema) if c[0] == ts_col),
+                                None,
+                            )
+                            if idx_ts is not None:
+                                for row in lote:
+                                    ts_val = row[idx_ts]
+                                    if isinstance(ts_val, datetime):
+                                        if (max_ts is None) or (ts_val > max_ts):
+                                            max_ts = ts_val
                     except Exception as e:
                         conn_supabase.rollback()
-                        logger.error(f"Erro ao inserir dados na tabela {nome_tabela}: {e}")
+                        logger.error(
+                            f"Erro ao inserir lote na tabela {nome_tabela}: {e}"
+                        )
                         raise
+
+                if total_inseridos > 0:
+                    nova_ultima_carga = max_ts if (ts_col and max_ts) else datetime.now()
+                    cursor_supabase.execute(
+                        "UPDATE controle_cargas SET ultima_carga = %s, linhas_carregadas = COALESCE(linhas_carregadas,0) + %s WHERE tabela_nome = %s",
+                        (nova_ultima_carga, total_inseridos, nome_tabela),
+                    )
+                    conn_supabase.commit()
+                    dur = (datetime.now() - ini).total_seconds()
+                    logger.info(
+                        f"{total_inseridos} registros inseridos em {nome_tabela} (tempo: {dur:.2f}s). Última carga: {nova_ultima_carga}."
+                    )
                 else:
-                    logger.warning(f"Não há dados para carregar na tabela {nome_tabela}.")
+                    logger.info(f"Nenhum registro novo para {nome_tabela}.")
     except Exception as e:
         logger.error(f"Erro ao processar tabela {nome_tabela}: {e}")
         raise
 
 
-def ordenar_tabelas_topologicamente(tabelas, metadados):
-    """
-    Ordena as tabelas com base nas dependências encontradas no schema_json da table_metadata.
-    Se os metadados não estiverem disponíveis para alguma tabela, considera-se que ela não possui dependências.
-    """
-    grafo = defaultdict(list)
-    in_degree = {tabela: 0 for tabela in tabelas}
+def ordenar_tabelas_topologicamente(
+    tabelas: List[str], metadados: Dict[str, str]
+) -> List[str]:
+    """Ordena as tabelas com base nas dependências inferidas em schema_json."""
+    grafo: Dict[str, List[str]] = defaultdict(list)
+    in_degree: Dict[str, int] = {tabela: 0 for tabela in tabelas}
     for tabela in tabelas:
         schema_json_str = metadados.get(tabela)
-        dependencias = []
+        dependencias: List[str] = []
         if schema_json_str:
             try:
                 schema_dict = json.loads(schema_json_str)
-                for col, definicao in schema_dict.items():
+                for _, definicao in schema_dict.items():
                     fk = definicao.get("foreign_key")
                     if fk and fk.get("table"):
                         dependencias.append(fk.get("table"))
@@ -234,9 +410,8 @@ def ordenar_tabelas_topologicamente(tabelas, metadados):
             if dep in tabelas:
                 grafo[dep].append(tabela)
                 in_degree[tabela] += 1
-    from collections import deque
     fila = deque([tabela for tabela in tabelas if in_degree[tabela] == 0])
-    ordenadas = []
+    ordenadas: List[str] = []
     while fila:
         node = fila.popleft()
         ordenadas.append(node)
@@ -250,29 +425,27 @@ def ordenar_tabelas_topologicamente(tabelas, metadados):
     return ordenadas
 
 
-def main():
+def main() -> None:
     try:
-        # Cria a tabela de controle no Supabase
-        with psycopg2.connect(
-            host=DB_HOST, database=DB_NAME, user=DB_USER, password=DB_PASSWORD, port=DB_PORT
-        ) as conn_supabase:
+        with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
             with conn_supabase.cursor() as cursor_supabase:
                 criar_tabela_controle(cursor_supabase)
 
-        # Obter a lista de tabelas do DuckDB
-        tabelas_duckdb = conn_duckdb.execute("SHOW TABLES").fetchall()
+        conn_duck = get_duckdb_connection()
+        tabelas_duckdb = conn_duck.execute("SHOW TABLES").fetchall()
         nomes_tabelas = [tabela[0] for tabela in tabelas_duckdb]
 
-        # Processar a tabela de metadados primeiro, se existir
         if "table_metadata" in nomes_tabelas:
             logger.info("Processando tabela 'table_metadata' primeiro.")
             processar_tabela("table_metadata")
             nomes_tabelas.remove("table_metadata")
 
-        # Carregar metadados do DuckDB (para ordenação) a partir da tabela table_metadata
-        metadados = {}
+        metadados: Dict[str, str] = {}
         try:
-            resultados = conn_duckdb.execute("SELECT table_name, schema_json FROM table_metadata").fetchall()
+            conn_duck = get_duckdb_connection()
+            resultados = conn_duck.execute(
+                "SELECT table_name, schema_json FROM table_metadata"
+            ).fetchall()
             for row in resultados:
                 metadados[row[0]] = row[1]
         except Exception as e:
@@ -285,7 +458,7 @@ def main():
         logger.error(f"Erro no pipeline: {e}")
         raise
     finally:
-        conn_duckdb.close()
+        close_duckdb_connection()
         logger.info("Pipeline concluído.")
 
 

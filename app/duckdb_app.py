@@ -5,56 +5,8 @@ import json
 import duckdb
 import os
 import logging
-import re
 from pathlib import Path
 from dotenv import load_dotenv
-
-# ===== Utilitários de Validação =====
-def sanitize_identifier(name: str) -> str:
-    """
-    Valida e sanitiza identificadores (nomes de tabelas/colunas).
-    Aceita apenas caracteres alfanuméricos e underscores.
-    """
-    if not name or not isinstance(name, str):
-        raise ValueError("Identificador inválido: deve ser uma string não vazia.")
-    
-    # Remove espaços em branco
-    name = name.strip()
-    
-    # Verifica se contém apenas caracteres válidos
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', name):
-        raise ValueError(
-            f"Identificador inválido '{name}': deve começar com letra ou underscore "
-            "e conter apenas letras, números e underscores."
-        )
-    
-    # Previne palavras reservadas do SQL
-    reserved_words = {
-        'select', 'insert', 'update', 'delete', 'drop', 'create', 
-        'alter', 'table', 'from', 'where', 'union', 'exec', 'execute'
-    }
-    if name.lower() in reserved_words:
-        raise ValueError(f"Identificador '{name}' é uma palavra reservada do SQL.")
-    
-    return name
-
-def validate_data_type(data_type: str) -> str:
-    """
-    Valida tipos de dados permitidos no DuckDB.
-    """
-    allowed_types = {
-        'VARCHAR', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT',
-        'DOUBLE', 'FLOAT', 'DECIMAL', 'BOOLEAN', 'DATE', 
-        'TIMESTAMP', 'TIME', 'BLOB', 'TEXT'
-    }
-    
-    data_type = data_type.strip().upper()
-    base_type = data_type.split('(')[0]  # Remove parâmetros como VARCHAR(50)
-    
-    if base_type not in allowed_types:
-        raise ValueError(f"Tipo de dado '{data_type}' não permitido.")
-    
-    return data_type
 
 # ===== Configuração do Ambiente e Logging =====
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -80,7 +32,7 @@ class DuckDBPipeline:
         self.sync_metadata_with_existing_tables()
 
     def create_metadata_tables(self):
-        
+        # Tabela de metadados
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS table_metadata (
@@ -89,7 +41,7 @@ class DuckDBPipeline:
             );
             """
         )
-
+        # Tabela de metadados das FKs
         self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS fk_metadata (
@@ -114,20 +66,21 @@ class DuckDBPipeline:
                     self.register_table_metadata(table)
 
     def register_table_metadata(self, table_name: str):
-        # Valida o nome da tabela
-        table_name = sanitize_identifier(table_name)
-        
-        # Obter estrutura da tabela
+        # Obter a estrutura da tabela
         columns_info = self.conn.execute(
             f"PRAGMA table_info('{table_name}')"
         ).fetchall()
-        fk_info = self.conn.execute(
-            f"PRAGMA foreign_key_list('{table_name}')"
-        ).fetchall()
+        # Obter FKs (usando o pragma próprio do DuckDB, se disponível)
+        try:
+            fk_info = self.conn.execute(
+                f"PRAGMA foreign_key_list('{table_name}')"
+            ).fetchall()
+        except Exception as e:
+            logging.warning(f"Não foi possível obter FK para {table_name}: {e}")
+            fk_info = []
 
         metadata = {}
         pk_found = False
-
 
         for col in columns_info:
             col_name = col[1]
@@ -138,15 +91,13 @@ class DuckDBPipeline:
             metadata[col_name] = {
                 "data_type": data_type,
                 "primary_key": is_pk,
-                "foreign_key": None  # inicializa sem FK
+                "foreign_key": None
             }
         if not pk_found:
             logging.warning(f"Tabela '{table_name}' não possui chave primária.")
-            # Garante que todas as colunas sejam marcadas como não PK
             for col in metadata:
                 metadata[col]["primary_key"] = False
 
-        # Processa informações de FK, se houver
         if fk_info:
             for fk in fk_info:
                 # PRAGMA foreign_key_list retorna: id, seq, table, from, to, on_update, on_delete, match
@@ -162,9 +113,6 @@ class DuckDBPipeline:
                     """,
                     (table_name, fk_column, ref_table, ref_column)
                 )
-        # Se não houver FK, elas já estão registradas como None
-
-        # Insere ou atualiza os metadados na tabela table_metadata
         self.conn.execute(
             """
             INSERT INTO table_metadata (table_name, schema_json)
@@ -176,13 +124,6 @@ class DuckDBPipeline:
         logging.info(f"Metadados da tabela '{table_name}' sincronizados.")
 
     def create_table_dynamic(self, table_name: str, fields: list):
-        # Valida o nome da tabela
-        try:
-            table_name = sanitize_identifier(table_name)
-        except ValueError as e:
-            raise ValueError(f"Nome de tabela inválido: {e}")
-        
-        # Verifica se a tabela já está registrada
         exists = self.conn.execute(
             "SELECT 1 FROM table_metadata WHERE table_name = ?",
             (table_name,)
@@ -198,20 +139,7 @@ class DuckDBPipeline:
             col_name = field.get("name")
             if not col_name:
                 raise ValueError("Cada campo deve ter um 'name' definido.")
-            
-            # Valida o nome da coluna
-            try:
-                col_name = sanitize_identifier(col_name)
-            except ValueError as e:
-                raise ValueError(f"Nome de coluna inválido '{col_name}': {e}")
-            
             data_type = field.get("data_type", "VARCHAR").strip() or "VARCHAR"
-            
-            # Valida o tipo de dado
-            try:
-                data_type = validate_data_type(data_type)
-            except ValueError as e:
-                raise ValueError(f"Tipo de dado inválido para coluna '{col_name}': {e}")
             col_def = f"{col_name} {data_type}"
             is_pk = field.get("primary_key", False)
             if is_pk:
@@ -221,21 +149,11 @@ class DuckDBPipeline:
                 "primary_key": is_pk,
                 "foreign_key": None
             }
-
-            # Verifica e registra FK, se houver
             fk = field.get("foreign_key")
             if fk:
                 fk_table = fk.get("table")
                 fk_column = fk.get("column")
                 if fk_table and fk_column:
-                    # Valida identificadores de FK
-                    try:
-                        fk_table = sanitize_identifier(fk_table)
-                        fk_column = sanitize_identifier(fk_column)
-                    except ValueError as e:
-                        raise ValueError(f"Identificador de FK inválido: {e}")
-                    
-                    # Verifica se a tabela referenciada já existe nos metadados
                     ref_exists = self.conn.execute(
                         "SELECT 1 FROM table_metadata WHERE table_name = ?",
                         (fk_table,)
@@ -248,11 +166,9 @@ class DuckDBPipeline:
                     raise ValueError(f"Chave estrangeira inválida para a coluna '{col_name}'")
             column_defs.append(col_def)
 
-        # Adiciona restrição de PK se existir
         if pk_columns:
             if len(pk_columns) > 1:
                 column_defs.append(f"PRIMARY KEY ({', '.join(pk_columns)})")
-            # Se somente uma PK, ela já pode estar definida na coluna
         else:
             logging.warning(f"Tabela '{table_name}' não possui chave primária.")
             for col in metadata:
@@ -261,8 +177,6 @@ class DuckDBPipeline:
         sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)});"
         self.conn.execute(sql)
         logging.info(f"Tabela '{table_name}' criada com sucesso.")
-
-        # Registra metadados na tabela table_metadata
         self.conn.execute(
             """
             INSERT INTO table_metadata (table_name, schema_json)
@@ -270,7 +184,6 @@ class DuckDBPipeline:
             """,
             (table_name, json.dumps(metadata))
         )
-        # Registra metadados de FK, se houver
         for field in fields:
             fk = field.get("foreign_key")
             if fk:
@@ -285,6 +198,45 @@ class DuckDBPipeline:
                     (table_name, field.get("name"), fk_table, fk_column)
                 )
 
+    def add_column(self, table_name: str, field: dict):
+        """Adiciona uma nova coluna em uma tabela já existente e atualiza os metadados."""
+        col_name = field.get("name")
+        if not col_name:
+            raise ValueError("Nome da coluna é obrigatório.")
+        data_type = field.get("data_type", "VARCHAR").strip() or "VARCHAR"
+        alter_sql = f"ALTER TABLE {table_name} ADD COLUMN {col_name} {data_type};"
+        self.conn.execute(alter_sql)
+        self.conn.commit()
+        # Atualiza metadados
+        metadata = self.get_table_metadata(table_name)
+        metadata[col_name] = {
+            "data_type": data_type,
+            "primary_key": field.get("primary_key", False),
+            "foreign_key": None
+        }
+        fk = field.get("foreign_key")
+        if fk:
+            fk_table = fk.get("table")
+            fk_column = fk.get("column")
+            if fk_table and fk_column:
+                metadata[col_name]["foreign_key"] = {"table": fk_table, "column": fk_column}
+                self.conn.execute(
+                    """
+                    INSERT INTO fk_metadata (table_name, column_name, ref_table, ref_column)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING;
+                    """,
+                    (table_name, col_name, fk_table, fk_column)
+                )
+            else:
+                raise ValueError(f"Chave estrangeira inválida para a coluna '{col_name}'")
+        self.conn.execute(
+            "UPDATE table_metadata SET schema_json = ? WHERE table_name = ?;",
+            (json.dumps(metadata), table_name)
+        )
+        self.conn.commit()
+        logging.info(f"Coluna '{col_name}' adicionada na tabela '{table_name}' e metadados atualizados.")
+
     def get_table_metadata(self, table_name: str):
         try:
             row = self.conn.execute(
@@ -298,7 +250,6 @@ class DuckDBPipeline:
 
     def insert_data(self, table_name: str, data: dict):
         metadata = self.get_table_metadata(table_name)
-        # Verifica integridade das FKs
         for col, info in metadata.items():
             fk = info.get("foreign_key")
             if fk and col in data and data[col] != "":
@@ -313,7 +264,6 @@ class DuckDBPipeline:
                     st.error(f"Valor '{value}' para a coluna '{col}' não existe na tabela referenciada '{ref_table}'.")
                     return False
 
-        # Verifica integridade da chave primária
         primary_keys = [col for col, info in metadata.items() if info.get("primary_key")]
         if primary_keys:
             missing = [pk for pk in primary_keys if not data.get(pk)]
@@ -412,11 +362,11 @@ pipeline = DuckDBPipeline(str(full_duckdb_path))
 # ===== Interface Streamlit =====
 st.title("📊 Interface DuckDB")
 
-# Menu lateral
+# Menu lateral com nova opção 'Adicionar Coluna'
 operation = st.sidebar.selectbox(
     "Operação",
     ("Criar Tabela", "Inserir Dados", "Atualizar Dados", "Deletar Dados", 
-     "Dropar Tabela", "Limpar Tabela", "Visualizar Tabela", "Listar Tabelas"),
+     "Dropar Tabela", "Adicionar Coluna", "Limpar Tabela", "Visualizar Tabela", "Listar Tabelas"),
     index=0
 )
 
@@ -430,7 +380,6 @@ if operation == "Criar Tabela":
         st.subheader("Definição de Campos")
         if "fields" not in st.session_state:
             st.session_state.fields = []
-
         col1, col2 = st.columns([1, 4])
         with col1:
             if st.button("➕ Adicionar Campo"):
@@ -441,26 +390,19 @@ if operation == "Criar Tabela":
                     "foreign_key_table": "",
                     "foreign_key_column": ""
                 })
-
         for idx, field in enumerate(st.session_state.fields):
             st.markdown(f"---\n**Campo #{idx+1}**")
             cols = st.columns([3, 2, 1, 3, 3])
             with cols[0]:
                 field["name"] = st.text_input("Nome", key=f"name_{idx}", value=field["name"])
             with cols[1]:
-                field["data_type"] = st.selectbox(
-                    "Tipo",
-                    ["VARCHAR", "INTEGER", "BOOLEAN", "DATE", "TIMESTAMP", "FLOAT", "BLOB"],
-                    key=f"type_{idx}",
-                    index=0
-                )
+                field["data_type"] = st.selectbox("Tipo", ["VARCHAR", "INTEGER", "BOOLEAN", "DATE", "TIMESTAMP", "FLOAT", "BLOB"], key=f"type_{idx}", index=0)
             with cols[2]:
                 field["primary_key"] = st.checkbox("PK", key=f"pk_{idx}", value=field["primary_key"])
             with cols[3]:
                 field["foreign_key_table"] = st.text_input("Tabela FK", key=f"fk_table_{idx}", value=field["foreign_key_table"])
             with cols[4]:
                 field["foreign_key_column"] = st.text_input("Coluna FK", key=f"fk_col_{idx}", value=field["foreign_key_column"])
-
         if st.button("✅ Criar Tabela", type="primary"):
             try:
                 fields = []
@@ -481,14 +423,9 @@ if operation == "Criar Tabela":
                 st.session_state.fields = []
             except Exception as e:
                 st.error(f"Erro: {str(e)}")
-    
     else:
         st.subheader("Definição por JSON")
-        json_schema = st.text_area(
-            "Cole o schema JSON (formato lista de objetos)",
-            height=200,
-            help='Exemplo: [{"name": "id", "data_type": "INTEGER", "primary_key": true}]'
-        )
+        json_schema = st.text_area("Cole o schema JSON (formato lista de objetos)", height=200, help='Exemplo: [{"name": "id", "data_type": "INTEGER", "primary_key": true}]')
         if st.button("✅ Criar via JSON", type="primary"):
             try:
                 fields = json.loads(json_schema)
@@ -501,27 +438,17 @@ if operation == "Criar Tabela":
 elif operation == "Inserir Dados":
     st.header("📥 Inserir Dados")
     tables = pipeline.list_tables()
-    
     if not tables:
         st.warning("Nenhuma tabela encontrada no banco de dados.")
     else:
         table_name = st.selectbox("Selecione a Tabela", tables)
         metadata = pipeline.get_table_metadata(table_name)
-        
         if metadata:
             with st.form("insert_form"):
                 st.subheader("Valores para Inserção")
                 data = {}
                 for col, info in metadata.items():
-                    data[col] = st.text_input(
-                        label=f"{col} ({info['data_type']})" + 
-                              (" 🔑" if info['primary_key'] else "") +
-                              (" 🌐" if info['foreign_key'] else ""),
-                        help=f"Tipo: {info['data_type']}" +
-                             (" | Chave Primária" if info['primary_key'] else "") +
-                             (f" | Chave Estrangeira: {info['foreign_key']['table']}.{info['foreign_key']['column']}" 
-                              if info['foreign_key'] else "")
-                    )
+                    data[col] = st.text_input(label=f"{col} ({info['data_type']})" + (" 🔑" if info['primary_key'] else "") + (" 🌐" if info['foreign_key'] else ""), help=f"Tipo: {info['data_type']}" + (" | Chave Primária" if info['primary_key'] else "") + (f" | Chave Estrangeira: {info['foreign_key']['table']}.{info['foreign_key']['column']}" if info['foreign_key'] else ""))
                 if st.form_submit_button("🚀 Inserir Dados"):
                     result = pipeline.insert_data(table_name, data)
                     if result:
@@ -531,33 +458,24 @@ elif operation == "Inserir Dados":
 elif operation == "Atualizar Dados":
     st.header("🔄 Atualizar Dados")
     tables = pipeline.list_tables()
-    
     if not tables:
         st.warning("Nenhuma tabela encontrada no banco de dados.")
     else:
         table_name = st.selectbox("Selecione a Tabela", tables, key="update_table")
         metadata = pipeline.get_table_metadata(table_name)
-        
         if metadata:
             with st.form("update_form"):
                 st.subheader("Novos Valores")
                 set_data = {}
                 for col in metadata.keys():
                     set_data[col] = st.text_input(f"Novo valor para {col}")
-                
                 st.subheader("Condição WHERE")
                 where_clause = st.text_input("Exemplo: id = ?", help="Use ? para parâmetros")
                 where_values = st.text_input("Valores (separados por vírgula)")
-                
                 if st.form_submit_button("💾 Salvar Alterações"):
                     try:
                         where_params = tuple([v.strip() for v in where_values.split(",")] if where_values else [])
-                        success = pipeline.update_data(
-                            table_name,
-                            {k: v for k, v in set_data.items() if v},
-                            where_clause,
-                            where_params
-                        )
+                        success = pipeline.update_data(table_name, {k: v for k, v in set_data.items() if v}, where_clause, where_params)
                         if success:
                             st.rerun()
                     except Exception as e:
@@ -596,6 +514,37 @@ elif operation == "Dropar Tabela":
                 st.success(f"Tabela '{table_name}' removida com sucesso!")
             except Exception as e:
                 st.error(f"Erro: {e}")
+
+# ----- ADICIONAR COLUNA -----
+elif operation == "Adicionar Coluna":
+    st.header("Adicionar Coluna em Tabela Existente")
+    tables = pipeline.list_tables()
+    if not tables:
+        st.warning("Nenhuma tabela encontrada.")
+    else:
+        table_name = st.selectbox("Selecione a Tabela", tables, key="add_column_table")
+        st.subheader("Definição da Nova Coluna")
+        new_col_name = st.text_input("Nome da Coluna", key="new_col_name")
+        new_col_type = st.selectbox("Tipo", ["VARCHAR", "INTEGER", "BOOLEAN", "DATE", "TIMESTAMP", "FLOAT", "BLOB"], key="new_col_type", index=0)
+        new_col_pk = st.checkbox("Chave Primária", key="new_col_pk")
+        fk_table = st.text_input("Tabela FK (opcional)", key="new_fk_table")
+        fk_column = st.text_input("Coluna FK (opcional)", key="new_fk_column")
+        if st.button("Adicionar Coluna"):
+            try:
+                field = {
+                    "name": new_col_name,
+                    "data_type": new_col_type,
+                    "primary_key": new_col_pk
+                }
+                if fk_table and fk_column:
+                    field["foreign_key"] = {
+                        "table": fk_table,
+                        "column": fk_column
+                    }
+                pipeline.add_column(table_name, field)
+                st.success(f"Coluna '{new_col_name}' adicionada na tabela '{table_name}' com sucesso!")
+            except Exception as e:
+                st.error(f"Erro ao adicionar coluna: {str(e)}")
 
 # ----- LIMPAR TABELA (TRUNCATE) -----
 elif operation == "Limpar Tabela":
