@@ -3,12 +3,13 @@ import psycopg2
 import logging
 import json
 import time
+import socket
 from datetime import datetime
 from dotenv import load_dotenv
 import os
 from pathlib import Path
 from collections import defaultdict, deque
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from psycopg2.extras import execute_values
 from psycopg2 import sql
 
@@ -38,6 +39,7 @@ DB_SSLMODE = os.getenv("DB_SSLMODE")
 DB_SSLROOTCERT = os.getenv("DB_SSLROOTCERT")
 if DB_SSLROOTCERT:
     DB_SSLROOTCERT = str(Path(DB_SSLROOTCERT).expanduser())
+DB_FORCE_IPV4 = os.getenv("DB_FORCE_IPV4", "false").lower() == "true"
 SUPABASE_MAX_RETRIES = int(os.getenv("SUPABASE_MAX_RETRIES", "3"))
 SUPABASE_RETRY_BASE_SECONDS = float(os.getenv("SUPABASE_RETRY_BASE_SECONDS", "2"))
 SUPABASE_RETRY_MAX_SECONDS = float(os.getenv("SUPABASE_RETRY_MAX_SECONDS", "30"))
@@ -45,6 +47,8 @@ SUPABASE_TRANSIENT_ERRORS = (
     "connection already closed",
     "server closed the connection unexpectedly",
     "terminating connection due to administrator command",
+    "network is unreachable",
+    "no route to host",
 )
 
 
@@ -80,12 +84,21 @@ if missing_vars:
     )
 
 conn_duckdb: Optional[duckdb.DuckDBPyConnection] = None
+RESOLVED_DB_HOST_IPV4: Optional[str] = None
 
 
 def is_transient_supabase_error(error: Exception) -> bool:
     """Verifica se o erro indica uma queda temporária na conexão com o Supabase/Postgres."""
     msg = str(error).lower()
     return any(fragment in msg for fragment in SUPABASE_TRANSIENT_ERRORS)
+
+
+def resolve_ipv4_address(hostname: str) -> str:
+    """Resolve um hostname para IPv4, falhando explicitamente se não for possível."""
+    infos = socket.getaddrinfo(hostname, None, socket.AF_INET)
+    if not infos:
+        raise ValueError(f"Não foi possível resolver IPv4 para {hostname}")
+    return infos[0][4][0]
 
 
 def get_postgres_connection_params() -> Dict[str, str]:
@@ -101,6 +114,20 @@ def get_postgres_connection_params() -> Dict[str, str]:
         params["sslmode"] = DB_SSLMODE
     if DB_SSLROOTCERT:
         params["sslrootcert"] = DB_SSLROOTCERT
+    if DB_FORCE_IPV4 and DB_HOST:
+        global RESOLVED_DB_HOST_IPV4
+        if RESOLVED_DB_HOST_IPV4 is None:
+            try:
+                RESOLVED_DB_HOST_IPV4 = resolve_ipv4_address(DB_HOST)
+                logger.info(
+                    f"Hostname {DB_HOST} resolvido para IPv4 {RESOLVED_DB_HOST_IPV4}."
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Não foi possível resolver IPv4 para {DB_HOST}. Prosseguindo sem hostaddr: {e}"
+                )
+        if RESOLVED_DB_HOST_IPV4:
+            params["hostaddr"] = RESOLVED_DB_HOST_IPV4
     return params
 
 
@@ -276,6 +303,35 @@ def verificar_e_corrigir_constraints(
             except Exception as e:
                 cursor_supabase.execute("ROLLBACK TO SAVEPOINT sp_fk")
                 logger.error(f"Erro ao adicionar FK em {nome_tabela} para coluna {fk_col}: {e}")
+
+
+def executar_operacao_supabase(
+    func: Callable[[], None], contexto: str
+) -> None:
+    """Executa uma operação contra o Supabase com retentativas automáticas."""
+    last_error: Optional[Exception] = None
+    for tentativa in range(1, SUPABASE_MAX_RETRIES + 1):
+        try:
+            func()
+            return
+        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            last_error = e
+            if (not is_transient_supabase_error(e)) or tentativa == SUPABASE_MAX_RETRIES:
+                logger.error(f"Erro ao {contexto}: {e}")
+                raise
+            espera = min(
+                SUPABASE_RETRY_BASE_SECONDS * tentativa, SUPABASE_RETRY_MAX_SECONDS
+            )
+            logger.warning(
+                f"Falha ao {contexto} (tentativa {tentativa}/{SUPABASE_MAX_RETRIES}). "
+                f"Nova tentativa em {espera:.1f}s."
+            )
+            time.sleep(espera)
+        except Exception as e:
+            logger.error(f"Erro inesperado ao {contexto}: {e}")
+            raise
+    if last_error:
+        raise last_error
 
 
 def _processar_tabela_once(nome_tabela: str) -> None:
@@ -468,9 +524,14 @@ def ordenar_tabelas_topologicamente(
 
 def main() -> None:
     try:
-        with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
-            with conn_supabase.cursor() as cursor_supabase:
-                criar_tabela_controle(cursor_supabase)
+        def inicializar_tabela_controle() -> None:
+            with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
+                with conn_supabase.cursor() as cursor_supabase:
+                    criar_tabela_controle(cursor_supabase)
+
+        executar_operacao_supabase(
+            inicializar_tabela_controle, "criar/verificar tabela de controle"
+        )
 
         conn_duck = get_duckdb_connection()
         tabelas_duckdb = conn_duck.execute("SHOW TABLES").fetchall()
