@@ -2,6 +2,7 @@ import duckdb
 import psycopg2
 import logging
 import json
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 import os
@@ -37,6 +38,14 @@ DB_SSLMODE = os.getenv("DB_SSLMODE")
 DB_SSLROOTCERT = os.getenv("DB_SSLROOTCERT")
 if DB_SSLROOTCERT:
     DB_SSLROOTCERT = str(Path(DB_SSLROOTCERT).expanduser())
+SUPABASE_MAX_RETRIES = int(os.getenv("SUPABASE_MAX_RETRIES", "3"))
+SUPABASE_RETRY_BASE_SECONDS = float(os.getenv("SUPABASE_RETRY_BASE_SECONDS", "2"))
+SUPABASE_RETRY_MAX_SECONDS = float(os.getenv("SUPABASE_RETRY_MAX_SECONDS", "30"))
+SUPABASE_TRANSIENT_ERRORS = (
+    "connection already closed",
+    "server closed the connection unexpectedly",
+    "terminating connection due to administrator command",
+)
 
 
 TIMESTAMP_CANDIDATES = [
@@ -71,6 +80,12 @@ if missing_vars:
     )
 
 conn_duckdb: Optional[duckdb.DuckDBPyConnection] = None
+
+
+def is_transient_supabase_error(error: Exception) -> bool:
+    """Verifica se o erro indica uma queda temporária na conexão com o Supabase/Postgres."""
+    msg = str(error).lower()
+    return any(fragment in msg for fragment in SUPABASE_TRANSIENT_ERRORS)
 
 
 def get_postgres_connection_params() -> Dict[str, str]:
@@ -263,129 +278,155 @@ def verificar_e_corrigir_constraints(
                 logger.error(f"Erro ao adicionar FK em {nome_tabela} para coluna {fk_col}: {e}")
 
 
-def processar_tabela(nome_tabela: str) -> None:
-    """Processa (cria/atualiza) uma tabela específica no destino."""
-    try:
-        with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
-            with conn_supabase.cursor() as cursor_supabase:
-                ini = datetime.now()
+def _processar_tabela_once(nome_tabela: str) -> None:
+    """Executa uma única tentativa de processamento (criar/atualizar) da tabela destino."""
+    with psycopg2.connect(**get_postgres_connection_params()) as conn_supabase:
+        with conn_supabase.cursor() as cursor_supabase:
+            ini = datetime.now()
 
+            cursor_supabase.execute(
+                "SELECT ultima_carga, linhas_carregadas FROM controle_cargas WHERE tabela_nome = %s",
+                (nome_tabela,),
+            )
+            row_ctrl = cursor_supabase.fetchone()
+            existe = row_ctrl is not None
+            ultima_carga_prev: Optional[datetime] = row_ctrl[0] if row_ctrl else None
+
+            duck_schema, duck_pk_columns = get_duckdb_table_schema(nome_tabela)
+            duck_fk_info = get_duckdb_fk_info(nome_tabela)
+
+            if not existe:
+                logger.info(f"Criando tabela {nome_tabela} no Supabase.")
+                colunas_supabase = []
+                for col in duck_schema:
+                    tipo_postgres = mapear_tipo_duckdb_para_postgres_type(col[1])
+                    colunas_supabase.append(f'"{col[0]}" {tipo_postgres}')
+                if duck_pk_columns:
+                    pk_cols_str = ", ".join([f'"{col}"' for col in duck_pk_columns])
+                    colunas_supabase.append(f"PRIMARY KEY ({pk_cols_str})")
+                query_criar = (
+                    f"CREATE TABLE {nome_tabela} ({', '.join(colunas_supabase)});"
+                )
+                cursor_supabase.execute(query_criar)
+                conn_supabase.commit()
+                logger.info(f"Tabela {nome_tabela} criada no Supabase.")
                 cursor_supabase.execute(
-                    "SELECT ultima_carga, linhas_carregadas FROM controle_cargas WHERE tabela_nome = %s",
-                    (nome_tabela,),
+                    "INSERT INTO controle_cargas (tabela_nome, ultima_carga, linhas_carregadas) VALUES (%s, %s, %s)",
+                    (nome_tabela, None, 0),
                 )
-                row_ctrl = cursor_supabase.fetchone()
-                existe = row_ctrl is not None
-                ultima_carga_prev: Optional[datetime] = row_ctrl[0] if row_ctrl else None
-
-                duck_schema, duck_pk_columns = get_duckdb_table_schema(nome_tabela)
-                duck_fk_info = get_duckdb_fk_info(nome_tabela)
-
-                if not existe:
-                    logger.info(f"Criando tabela {nome_tabela} no Supabase.")
-                    colunas_supabase = []
-                    for col in duck_schema:
-                        tipo_postgres = mapear_tipo_duckdb_para_postgres_type(col[1])
-                        colunas_supabase.append(f'"{col[0]}" {tipo_postgres}')
-                    if duck_pk_columns:
-                        pk_cols_str = ", ".join([f'"{col}"' for col in duck_pk_columns])
-                        colunas_supabase.append(f"PRIMARY KEY ({pk_cols_str})")
-                    query_criar = (
-                        f"CREATE TABLE {nome_tabela} ({', '.join(colunas_supabase)});"
-                    )
-                    cursor_supabase.execute(query_criar)
-                    conn_supabase.commit()
-                    logger.info(f"Tabela {nome_tabela} criada no Supabase.")
-                    cursor_supabase.execute(
-                        "INSERT INTO controle_cargas (tabela_nome, ultima_carga, linhas_carregadas) VALUES (%s, %s, %s)",
-                        (nome_tabela, None, 0),
-                    )
-                    conn_supabase.commit()
-                else:
-                    logger.info(
-                        f"Tabela {nome_tabela} já existe no Supabase. Verificando constraints..."
-                    )
-                    verificar_e_corrigir_constraints(
-                        cursor_supabase, nome_tabela, duck_pk_columns, duck_fk_info
-                    )
-
-                if TRUNCATE_BEFORE_LOAD:
-                    cursor_supabase.execute(
-                        f"TRUNCATE TABLE {nome_tabela} RESTART IDENTITY CASCADE;"
-                    )
-                    conn_supabase.commit()
-                    logger.info(f"Tabela {nome_tabela} truncada com sucesso.")
-
-                ts_col = INCREMENTAL_TIMESTAMP_COLUMN or detectar_coluna_timestamp_incremental(
-                    nome_tabela
+                conn_supabase.commit()
+            else:
+                logger.info(
+                    f"Tabela {nome_tabela} já existe no Supabase. Verificando constraints..."
                 )
-                if TRUNCATE_BEFORE_LOAD:
-                    ultima_carga_prev = None
-
-                if ts_col and ultima_carga_prev is not None:
-                    query_duck = f"SELECT * FROM {nome_tabela} WHERE {ts_col} > ?"
-                    params = [ultima_carga_prev]
-                else:
-                    query_duck = f"SELECT * FROM {nome_tabela}"
-                    params: List[datetime] = []
-
-                col_names = [f'"{col[0]}"' for col in duck_schema]
-                query_insert = (
-                    f"INSERT INTO {nome_tabela} ({', '.join(col_names)}) VALUES %s ON CONFLICT DO NOTHING"
+                verificar_e_corrigir_constraints(
+                    cursor_supabase, nome_tabela, duck_pk_columns, duck_fk_info
                 )
 
-                total_inseridos = 0
-                max_ts: Optional[datetime] = ultima_carga_prev
+            if TRUNCATE_BEFORE_LOAD:
+                cursor_supabase.execute(
+                    f"TRUNCATE TABLE {nome_tabela} RESTART IDENTITY CASCADE;"
+                )
+                conn_supabase.commit()
+                logger.info(f"Tabela {nome_tabela} truncada com sucesso.")
 
-                conn_duck = get_duckdb_connection()
-                duck_cursor = conn_duck.execute(query_duck, params)
-                while True:
-                    lote = duck_cursor.fetchmany(BATCH_SIZE)
-                    if not lote:
-                        break
+            ts_col = INCREMENTAL_TIMESTAMP_COLUMN or detectar_coluna_timestamp_incremental(
+                nome_tabela
+            )
+            if TRUNCATE_BEFORE_LOAD:
+                ultima_carga_prev = None
+
+            if ts_col and ultima_carga_prev is not None:
+                query_duck = f"SELECT * FROM {nome_tabela} WHERE {ts_col} > ?"
+                params = [ultima_carga_prev]
+            else:
+                query_duck = f"SELECT * FROM {nome_tabela}"
+                params: List[datetime] = []
+
+            col_names = [f'"{col[0]}"' for col in duck_schema]
+            query_insert = (
+                f"INSERT INTO {nome_tabela} ({', '.join(col_names)}) VALUES %s ON CONFLICT DO NOTHING"
+            )
+
+            total_inseridos = 0
+            max_ts: Optional[datetime] = ultima_carga_prev
+
+            conn_duck = get_duckdb_connection()
+            duck_cursor = conn_duck.execute(query_duck, params)
+            while True:
+                lote = duck_cursor.fetchmany(BATCH_SIZE)
+                if not lote:
+                    break
+                try:
+                    execute_values(
+                        cursor_supabase,
+                        query_insert,
+                        lote,
+                        page_size=BATCH_SIZE,
+                    )
+                    conn_supabase.commit()
+                    total_inseridos += len(lote)
+                    if ts_col:
+                        idx_ts = next(
+                            (i for i, c in enumerate(duck_schema) if c[0] == ts_col),
+                            None,
+                        )
+                        if idx_ts is not None:
+                            for row in lote:
+                                ts_val = row[idx_ts]
+                                if isinstance(ts_val, datetime):
+                                    if (max_ts is None) or (ts_val > max_ts):
+                                        max_ts = ts_val
+                except Exception as e:
                     try:
-                        execute_values(
-                            cursor_supabase,
-                            query_insert,
-                            lote,
-                            page_size=BATCH_SIZE,
-                        )
-                        conn_supabase.commit()
-                        total_inseridos += len(lote)
-                        if ts_col:
-                            idx_ts = next(
-                                (i for i, c in enumerate(duck_schema) if c[0] == ts_col),
-                                None,
-                            )
-                            if idx_ts is not None:
-                                for row in lote:
-                                    ts_val = row[idx_ts]
-                                    if isinstance(ts_val, datetime):
-                                        if (max_ts is None) or (ts_val > max_ts):
-                                            max_ts = ts_val
-                    except Exception as e:
                         conn_supabase.rollback()
-                        logger.error(
-                            f"Erro ao inserir lote na tabela {nome_tabela}: {e}"
+                    except psycopg2.InterfaceError:
+                        logger.warning(
+                            "Rollback ignorado pois a conexão com o Supabase já estava encerrada."
                         )
-                        raise
+                    logger.error(f"Erro ao inserir lote na tabela {nome_tabela}: {e}")
+                    raise
 
-                if total_inseridos > 0:
-                    nova_ultima_carga = max_ts if (ts_col and max_ts) else datetime.now()
-                    cursor_supabase.execute(
-                        "UPDATE controle_cargas SET ultima_carga = %s, linhas_carregadas = COALESCE(linhas_carregadas,0) + %s WHERE tabela_nome = %s",
-                        (nova_ultima_carga, total_inseridos, nome_tabela),
-                    )
-                    conn_supabase.commit()
-                    dur = (datetime.now() - ini).total_seconds()
-                    logger.info(
-                        f"{total_inseridos} registros inseridos em {nome_tabela} (tempo: {dur:.2f}s). Última carga: {nova_ultima_carga}."
-                    )
-                else:
-                    logger.info(f"Nenhum registro novo para {nome_tabela}.")
-    except Exception as e:
-        logger.error(f"Erro ao processar tabela {nome_tabela}: {e}")
-        raise
+            if total_inseridos > 0:
+                nova_ultima_carga = max_ts if (ts_col and max_ts) else datetime.now()
+                cursor_supabase.execute(
+                    "UPDATE controle_cargas SET ultima_carga = %s, linhas_carregadas = COALESCE(linhas_carregadas,0) + %s WHERE tabela_nome = %s",
+                    (nova_ultima_carga, total_inseridos, nome_tabela),
+                )
+                conn_supabase.commit()
+                dur = (datetime.now() - ini).total_seconds()
+                logger.info(
+                    f"{total_inseridos} registros inseridos em {nome_tabela} (tempo: {dur:.2f}s). Última carga: {nova_ultima_carga}."
+                )
+            else:
+                logger.info(f"Nenhum registro novo para {nome_tabela}.")
+
+
+def processar_tabela(nome_tabela: str) -> None:
+    """Processa a tabela com retentativas automáticas em caso de queda de conexão."""
+    last_error: Optional[Exception] = None
+    for tentativa in range(1, SUPABASE_MAX_RETRIES + 1):
+        try:
+            _processar_tabela_once(nome_tabela)
+            return
+        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            last_error = e
+            if (not is_transient_supabase_error(e)) or tentativa == SUPABASE_MAX_RETRIES:
+                logger.error(f"Erro ao processar tabela {nome_tabela}: {e}")
+                raise
+            espera = min(
+                SUPABASE_RETRY_BASE_SECONDS * tentativa, SUPABASE_RETRY_MAX_SECONDS
+            )
+            logger.warning(
+                f"Conexão com Supabase perdida ao processar {nome_tabela} "
+                f"(tentativa {tentativa}/{SUPABASE_MAX_RETRIES}). Nova tentativa em {espera:.1f}s."
+            )
+            time.sleep(espera)
+        except Exception as e:
+            logger.error(f"Erro ao processar tabela {nome_tabela}: {e}")
+            raise
+    if last_error:
+        raise last_error
 
 
 def ordenar_tabelas_topologicamente(
