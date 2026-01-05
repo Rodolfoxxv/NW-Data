@@ -1,0 +1,49 @@
+name: Supabase Pipeline
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'scripts/incremental_loader.py'
+      - 'data/database.duckdb'
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    env:
+      DUCKDB_PATH: ${{ secrets.DUCKDB_PATH || 'database.duckdb' }}
+      DESTINATION_PATH: ${{ secrets.DESTINATION_PATH || './data' }}
+      DB_HOST: ${{ secrets.DB_HOST }}
+      DB_NAME: ${{ secrets.DB_NAME }}
+      DB_USER: ${{ secrets.DB_USER }}
+      DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+      DB_PORT: ${{ secrets.DB_PORT || '5432' }}
+      DB_SSLMODE: ${{ secrets.DB_SSLMODE }}
+      DB_SSLROOTCERT: ${{ secrets.DB_SSLROOTCERT }}
+    
+    steps:
+      # Verifica o repositório
+      - name: Check out repository
+        uses: actions/checkout@v4
+        
+      # Instala Python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      # Instala dependências
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Bootstrap sample DuckDB
+        run: |
+          python scripts/bootstrap_duckdb.py
+
+      # Executa o script Python
+      - name: Run incremental_loader.py
+        run: |
+          python scripts/incremental_loader.py
